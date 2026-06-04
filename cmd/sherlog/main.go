@@ -33,7 +33,7 @@ func run(args []string) error {
 
 	switch cmd := args[0]; cmd {
 	case "daemon":
-		return daemon.Run()
+		return daemon.Run(version)
 	case "mcp":
 		// Cancel the MCP server on interrupt so stdio shuts down cleanly.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

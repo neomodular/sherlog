@@ -17,13 +17,13 @@
 
 ## 3. Daemon HTTP Server (log-ingest)
 
-- [ ] 3.1 Implement `sherlog daemon`: loopback-only listener on 2218 with `SHERLOG_PORT` override; fail fast with clear message if the port is held by a foreign process
-- [ ] 3.2 Implement `POST /log/<session>/<probe>`: tolerant body parsing (JSON attempt → raw string fallback, empty OK), always-200 for routed requests, drop unknown sessions silently, <50ms response
-- [ ] 3.3 Implement CORS: `Access-Control-Allow-Origin: *` on responses + OPTIONS preflight handling
-- [ ] 3.4 Implement `GET /health` (version, uptime) and internal API endpoints for MCP-process operations (session CRUD, board, query, await)
-- [ ] 3.5 Implement the await/long-poll engine: open-or-attach run, quiet-after-activity debounce (~2s), timeout return, run close with verdict
-- [ ] 3.6 Implement query + per-run probe summary endpoints (counts, first/last samples, truncation disclosure)
-- [ ] 3.7 Integration tests: browser-style simple-request POST (no preflight), flood, await debounce/timeout/re-attach, unknown-session drop
+- [x] 3.1 Implement `sherlog daemon`: loopback-only listener on 2218 with `SHERLOG_PORT` override; fail fast with clear message if the port is held by a foreign process
+- [x] 3.2 Implement `POST /log/<session>/<probe>`: tolerant body parsing (JSON attempt → raw string fallback, empty OK), always-200 for routed requests, drop unknown sessions silently, <50ms response
+- [x] 3.3 Implement CORS: `Access-Control-Allow-Origin: *` on responses + OPTIONS preflight handling
+- [x] 3.4 Implement `GET /health` (version, uptime) and internal API endpoints for MCP-process operations (session CRUD, board, query, await)
+- [x] 3.5 Implement the await/long-poll engine: open-or-attach run, quiet-after-activity debounce (~2s), timeout return, run close with verdict
+- [x] 3.6 Implement query + per-run probe summary endpoints (counts, first/last samples, truncation disclosure)
+- [x] 3.7 Integration tests: browser-style simple-request POST (no preflight), flood, await debounce/timeout/re-attach, unknown-session drop
 
 ## 4. MCP Server (mcp-server)
 

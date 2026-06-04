@@ -31,6 +31,13 @@ type sessionEntry struct {
 	session *Session
 	floods  map[floodKey]*floodBuffer
 	nextRun int // monotonic counter for human-friendly run IDs (r1, r2, ...)
+
+	// appendMu serializes appends to this session's logs.jsonl independently of
+	// the global Store.mu. Ingest performs the file write under this per-session
+	// lock instead of the global one so a hot-loop probe (D8: 48,201 events) does
+	// not block the await engine's polling or other sessions on a file-write
+	// syscall (avoids cross-session head-of-line blocking).
+	appendMu sync.Mutex
 }
 
 // recordEvent feeds an event into the right flood buffer, creating it on demand.
@@ -377,6 +384,34 @@ func (s *Store) OpenRun(sessionID string) (Run, error) {
 	return run, nil
 }
 
+// OpenOrAttachRun returns the session's latest open run, or opens a new one if
+// none is open — atomically, under a single critical section. await uses this so
+// concurrent calls on a session with no open run converge on one run instead of
+// each opening its own (the LatestOpenRun+OpenRun pair was TOCTOU-racy, D8).
+func (s *Store) OpenOrAttachRun(sessionID string) (Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return Run{}, fmt.Errorf("open-or-attach run in %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	for i := len(entry.session.Runs) - 1; i >= 0; i-- {
+		if entry.session.Runs[i].ClosedAt == nil {
+			return entry.session.Runs[i], nil
+		}
+	}
+
+	entry.nextRun++
+	run := Run{ID: "r" + strconv.Itoa(entry.nextRun), StartedAt: time.Now().UTC()}
+	entry.session.Runs = append(entry.session.Runs, run)
+	if err := s.writeState(entry.session); err != nil {
+		return Run{}, err
+	}
+	return run, nil
+}
+
 // CloseRun records the user's verdict on a run (D7).
 func (s *Store) CloseRun(sessionID, runID string, verdict RunVerdict) (Run, error) {
 	s.mu.Lock()
@@ -430,11 +465,13 @@ func (s *Store) LatestOpenRun(sessionID string) (Run, bool, error) {
 // correctly (D7). Unknown sessions are rejected with ErrSessionNotFound so the
 // HTTP handler can drop drive-by POSTs silently (D4).
 func (s *Store) Ingest(sessionID, probeID string, body any, raw string) error {
+	// In-memory mutation under the global lock is fast and bounded (D8); the
+	// disk append is moved out of this critical section so it cannot serialize
+	// the await engine or other sessions on a file-write syscall.
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	entry, ok := s.sessions[sessionID]
 	if !ok {
+		s.mu.Unlock()
 		return fmt.Errorf("ingest for %q: %w", sessionID, ErrSessionNotFound)
 	}
 
@@ -447,10 +484,17 @@ func (s *Store) Ingest(sessionID, probeID string, body any, raw string) error {
 	}
 
 	ev := LogEvent{TS: time.Now().UTC(), Run: run, Probe: probeID, Body: body, Raw: raw}
+	entry.recordEvent(ev, s.floodN)
+	s.mu.Unlock()
+
+	// appendMu serializes writers to this session's logs.jsonl so concurrent
+	// ingests for the same session produce whole, ordered lines without holding
+	// the global lock across the syscall.
+	entry.appendMu.Lock()
+	defer entry.appendMu.Unlock()
 	if err := s.appendLog(sessionID, ev); err != nil {
 		return err
 	}
-	entry.recordEvent(ev, s.floodN)
 	return nil
 }
 
@@ -462,6 +506,28 @@ type ProbeSummary struct {
 	Total     int        `json:"total"`
 	Truncated bool       `json:"truncated"`
 	Events    []LogEvent `json:"events"`
+}
+
+// RunTotal sums the true event count across every probe in a run without
+// materializing per-probe summaries. The await engine polls this ~10x/sec (D8)
+// as its activity signal, so it must stay cheap even under a hot-loop probe
+// (48,201 events) — it reads only counters and never allocates retained events.
+func (s *Store) RunTotal(sessionID, runID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return 0, fmt.Errorf("run total for %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	total := 0
+	for key, buf := range entry.floods {
+		if key.run == runID {
+			total += buf.total
+		}
+	}
+	return total, nil
 }
 
 // RunSummary returns one ProbeSummary per probe that fired in the run, sorted by

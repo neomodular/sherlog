@@ -38,9 +38,20 @@ func (b *floodBuffer) add(ev LogEvent) {
 }
 
 // truncated reports whether any middle events were dropped, i.e. the total
-// exceeds what the first/last windows can jointly retain.
+// exceeds what the first/last windows can jointly retain. Computed from counters
+// rather than events() so callers reading both never traverse the buffer twice.
 func (b *floodBuffer) truncated() bool {
-	return b.total > len(b.events())
+	return b.total > b.retained()
+}
+
+// retained reports how many events events() would return, without building them.
+// It mirrors events()'s de-duplication of the first/last overlap: below the gap
+// threshold every event is kept; once a middle gap opens, first-N plus last-N.
+func (b *floodBuffer) retained() int {
+	if b.total <= 2*b.n {
+		return b.total
+	}
+	return len(b.first) + len(b.last)
 }
 
 // events returns the retained events in chronological order, de-duplicating the
