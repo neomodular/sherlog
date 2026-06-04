@@ -16,9 +16,9 @@
 
 ## 3. MCP + skill
 
-- [ ] 3.1 `diff_runs(run_a, run_b)` tool; `debug_end` optional resolution fields (backward compatible); `debug_start` related-cases section
-- [ ] 3.2 Update `skills/debug/SKILL.md`: record resolutions at close, use recalled cases as cited leads (never evidence), include Case Board URL in the banner
-- [ ] 3.3 E2E test: solve a simulated case with resolution → new debug_start recalls it → diff_runs across reproduce/fixed-check runs
+- [x] 3.1 `diff_runs(run_a, run_b)` tool; `debug_end` optional resolution fields (backward compatible); `debug_start` related-cases section
+- [x] 3.2 Update `skills/debug/SKILL.md`: record resolutions at close, use recalled cases as cited leads (never evidence), include Case Board URL in the banner
+- [x] 3.3 E2E test: solve a simulated case with resolution → new debug_start recalls it → diff_runs across reproduce/fixed-check runs
 
 ## 4. Web UI
 

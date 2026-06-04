@@ -12,11 +12,11 @@ alive, where probes are, or what runs found.** After `/clear`, compaction, a
 crash, or days later, the board is what survives. Read it; do not remember it.
 
 All state lives behind MCP tools (`debug_start`, `set_hypotheses`,
-`register_probe`, `await_run`, `close_run`, `query_logs`, `update_hypothesis`,
-`remove_probe`, `debug_end`, `debug_resume`). Pass the `session_id` from
-`debug_start` to every subsequent call. One more tool stands apart from the case
-board — `report_observation`, the silent channel for sherlog's own misbehavior
-(see "When sherlog itself misbehaves" below).
+`register_probe`, `await_run`, `close_run`, `query_logs`, `diff_runs`,
+`update_hypothesis`, `remove_probe`, `debug_end`, `debug_resume`). Pass the
+`session_id` from `debug_start` to every subsequent call. One more tool stands
+apart from the case board — `report_observation`, the silent channel for sherlog's
+own misbehavior (see "When sherlog itself misbehaves" below).
 
 ## The loop at a glance
 
@@ -47,6 +47,26 @@ gather context → debug_start → ≥3 suspects (set_hypotheses)
      directory.** Warn the user (do not block): "There's already an open sherlog
      case (#<id>) for this folder — continuing as a separate investigation. Run
      `/debug resume` instead if you meant to pick that one up." Then proceed.
+   - `related_cases` — possibly-related **solved** past cases the daemon recalled
+     from this bug's description (each with `session_id`, the old `description`,
+     `root_cause`, and `fix_summary`). They are **leads, not evidence** — use them
+     per "Recalled cases as leads" below.
+
+### Recalled cases as leads (never evidence)
+
+When `related_cases` is non-empty, read them before naming suspects. A prior root
+cause that plausibly fits the new symptom is a strong *lead*: turn it into one of
+your hypotheses and **cite the source case** in that hypothesis's statement —
+e.g. `set_hypotheses(..., ["float rounding in discount calc (similar to case
+#b2c1)", ...])`. Binding limits:
+
+- **Leads only.** A recalled case may *suggest* a suspect; it may **never kill or
+  confirm** one. Probes remain the only evidence — every kill/confirm still needs a
+  probe + run note, exactly as for any other suspect.
+- **No fabrication.** Cite a case only when you actually used it. If nothing recalled
+  fits, ignore `related_cases` entirely and form suspects from the symptom.
+- Recall is keyword-matched and can mislead; treat a match as "worth a probe", not
+  "the answer". You may mention to the user that a similar case was solved before.
 
 ## 2 · Name the suspects (≥3)
 
@@ -181,7 +201,11 @@ is `confirmed` by probe evidence. Do not declare a winner on a hunch.
 3. Ask the user to retest; `await_run(session_id)`; then `close_run(session_id,
    verdict="fixed-check")`.
 4. Confirm the failure signature changed **as predicted** via the probe summary /
-   `query_logs`, *and* the user reports the bug is gone. Only with both: say
+   `query_logs`, *and* the user reports the bug is gone. To make the before/after
+   contrast explicit, `diff_runs(run_a=<reproduce run>, run_b=<fixed-check run>)`
+   lists the probes that diverged between the failing and fixed runs (divergent
+   ones first) — a fast confirmation that the discriminating probe stopped firing
+   (or changed value) exactly where the fix should bite. Only with both signals: say
    **"elementary."** and go to cleanup. If the signature didn't change, the fix is
    wrong or the cause is misidentified — reopen the board.
    - If the fixed-check summary is **fully adopted** (the repro beat `await_run`),
@@ -196,6 +220,15 @@ The probe URL is its own marker, so leftover probes are always findable.
 
 1. `debug_end(session_id)` → `unremoved_probes` (each with `file` + `line`),
    `greppable_fragment` (`…/log/<session>/`), and `cleanup_complete`.
+   **Record the resolution when solved:** if a root cause was confirmed, pass
+   `root_cause`, `fix_summary`, and `confirmed_hypothesis_id` to `debug_end` so the
+   case becomes recall material for future investigations —
+   `debug_end(session_id, root_cause="float rounding in discount calc",
+   fix_summary="switched discount math to integer cents", confirmed_hypothesis_id="h1")`.
+   Keep both fields concise and factual; the confirmed hypothesis is the one you
+   marked `confirmed`. **Never fabricate a resolution:** if the case is closing
+   **unsolved**, say so plainly to the user and call `debug_end(session_id)` with no
+   resolution fields — an unsolved close is valid and must not invent a root cause.
 2. **Remove every listed probe line** from the code. After deleting each,
    `remove_probe(session_id, id)`.
 3. **Grep gate (mandatory):** search the repo for the session fragment and require
@@ -298,8 +331,9 @@ cleanup gate. Verbosity changes how you *say* things, not what you *do*.
   "elementary.", "case closed").
 - **`minimal`** — drop all of it. **No sprite art, no detective phrases**, no
   flourish. Print plain status lines instead:
-  - In place of the banner: a one-line state, e.g.
-    `sherlog · case #<id> · N suspects · M probes · port <port>`.
+  - In place of the banner: a one-line state plus the Case Board link once, e.g.
+    `sherlog · case #<id> · N suspects · M probes · port <port>` followed by
+    `Case Board: http://127.0.0.1:<port>`.
   - In place of "the game is afoot": `Reproduce the bug now; waiting…`
   - In place of "elementary.": `Root cause confirmed: <hN> (<evidence>).`
   - In place of "case closed": `Done — all N probes removed, grep clean.`
@@ -355,11 +389,15 @@ the exact same sprite with no escape codes. Never substitute different glyphs.
 
 ```
 sherlog · case #<id> · N suspects · M probes · watching :2218
+Case Board: http://127.0.0.1:2218 — watch the investigation live
 ```
 
 `<id>` is the `session_id`; `N` = active suspects on the board; `M` = registered
 probes not yet removed; the port is the daemon's (use the actual port if
-`SHERLOG_PORT` is set).
+`SHERLOG_PORT` is set). The **Case Board** is the read-only browser UI the daemon
+serves — include its URL **once**, here in the opening banner (use the actual port
+if `SHERLOG_PORT` is set), so the user can watch evidence stream in while they
+reproduce. Do not repeat the link at later transitions.
 
 **Vocabulary** (use these exact phrases for the matching transitions, nothing
 else):
@@ -378,9 +416,12 @@ else):
 - [ ] Block on `await_run`; ask for the verdict; never assume it.
 - [ ] Zero events + "I reproduced it" → connectivity/probe-wiring check, not suspect-killing.
 - [ ] Fully adopted evidence (`adopted == total`) on a fixed-check → sanity-check, then accept with the "inferred" label or re-prompt for a live run.
+- [ ] Recalled cases used as leads only — cited when used, never killing/confirming a suspect; no fabricated citations.
 - [ ] Every kill/confirm carries an evidence note citing probe + run.
 - [ ] Fix verified by a `fixed-check` run whose signature changed as predicted.
+- [ ] Solved close records `root_cause` + `fix_summary` + `confirmed_hypothesis_id` at `debug_end`; unsolved close invents none.
 - [ ] `debug_end` → remove all probes → grep fragment = 0 matches → "case closed".
+- [ ] Case Board URL shown once in the opening banner.
 - [ ] State read from the daemon board, never from conversation memory.
 - [ ] sherlog itself misbehaved (not the user's bug) → `report_observation` silently, then continue.
 - [ ] `preferences` applied: `minimal` drops theming only — every obligation above still holds; `color: never` strips ANSI.

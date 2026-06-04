@@ -29,8 +29,18 @@ func registerTools(server *mcpsdk.Server, c *daemonClient) {
 	add(server, c, "debug_end",
 		"Close the investigation and get the cleanup checklist: every probe not yet "+
 			"marked removed (with file and line) plus the greppable URL fragment to "+
-			"verify zero leftover probes remain in the code.",
+			"verify zero leftover probes remain in the code. When the case is solved, "+
+			"pass root_cause, fix_summary, and confirmed_hypothesis_id so it becomes "+
+			"recall material for future investigations; omit them to close unsolved.",
 		debugEnd)
+
+	add(server, c, "diff_runs",
+		"Compare two runs of the active investigation probe-by-probe: which probes "+
+			"fired in each run, their counts, and first/last sample values, with "+
+			"divergent probes (fired in only one run, or ≥10× count difference) listed "+
+			"first. Use it to confirm a root cause — e.g. diff a reproduce run against a "+
+			"fixed-check run. Returns a compact comparison, never raw logs.",
+		diffRuns)
 
 	add(server, c, "set_hypotheses",
 		"Replace the hypothesis board with a list of suspect statements (provide at "+
@@ -107,6 +117,10 @@ type debugStartOut struct {
 	ProbeContract probeContract  `json:"probe_contract"`
 	Preferences   preferences    `json:"preferences"`             // skill presentation (design D4)
 	WarnSameCWD   *store.Session `json:"warn_same_cwd,omitempty"` // a concurrent open session here
+	// RelatedCases are possibly-related solved cases recall surfaced for this bug
+	// description (case-recall spec). They are leads the skill may cite when forming
+	// hypotheses — never evidence; probes remain the only evidence.
+	RelatedCases []store.RecallMatch `json:"related_cases,omitempty"`
 }
 
 func debugStart(ctx context.Context, c *daemonClient, in debugStartIn) (debugStartOut, error) {
@@ -120,6 +134,7 @@ func debugStart(ctx context.Context, c *daemonClient, in debugStartIn) (debugSta
 		ProbeContract: buildProbeContract(c.probeURLTemplate(res.Session.ID)),
 		Preferences:   res.Preferences,
 		WarnSameCWD:   res.ExistingSameCWD,
+		RelatedCases:  res.RelatedCases,
 	}, nil
 }
 
@@ -145,6 +160,12 @@ func debugResume(ctx context.Context, c *daemonClient, in debugResumeIn) (*store
 
 type debugEndIn struct {
 	SessionID string `json:"session_id,omitempty" jsonschema:"the session to close; omit for the latest open one"`
+	// Optional resolution recorded at close so the case becomes recall material
+	// (mcp-server spec). Omit all three to close unsolved; existing callers that send
+	// none keep working unchanged. Supply them only when a root cause was confirmed.
+	RootCause             string `json:"root_cause,omitempty" jsonschema:"the confirmed root cause, when solved"`
+	FixSummary            string `json:"fix_summary,omitempty" jsonschema:"a concise summary of the fix, when solved"`
+	ConfirmedHypothesisID string `json:"confirmed_hypothesis_id,omitempty" jsonschema:"the hypothesis confirmed as culprit, e.g. h2"`
 }
 
 type debugEndOut struct {
@@ -165,7 +186,18 @@ func debugEnd(ctx context.Context, c *daemonClient, in debugEndIn) (debugEndOut,
 		}
 		sessionID = sess.ID
 	}
-	res, err := c.closeSession(ctx, sessionID)
+	// Pass the resolution through only when at least one field is set; an all-empty
+	// resolution and a nil one both close the case unsolved (D4), so omitting the
+	// new fields preserves the prior debug_end behavior exactly.
+	var resolution *store.Resolution
+	if in.RootCause != "" || in.FixSummary != "" || in.ConfirmedHypothesisID != "" {
+		resolution = &store.Resolution{
+			RootCause:             in.RootCause,
+			FixSummary:            in.FixSummary,
+			ConfirmedHypothesisID: in.ConfirmedHypothesisID,
+		}
+	}
+	res, err := c.closeSession(ctx, sessionID, resolution)
 	if err != nil {
 		return debugEndOut{}, fmt.Errorf("debug_end: %w", err)
 	}
@@ -331,6 +363,34 @@ func queryLogs(ctx context.Context, c *daemonClient, in queryLogsIn) (queryLogsO
 		return queryLogsOut{}, fmt.Errorf("query_logs: %w", err)
 	}
 	return queryLogsOut{Results: results}, nil
+}
+
+type diffRunsIn struct {
+	RunA string `json:"run_a" jsonschema:"the first run ID to compare, e.g. 1"`
+	RunB string `json:"run_b" jsonschema:"the second run ID to compare, e.g. 3"`
+	// SessionID targets a specific investigation; omit to diff the latest open one,
+	// matching the latest-or-named pattern of debug_resume and close_run.
+	SessionID string `json:"session_id,omitempty" jsonschema:"the investigation; omit for the latest open one"`
+}
+
+// diffRuns compares two runs of one session (mcp-server spec: diff_runs tool).
+// The tool's contract is per the active session (run_a, run_b); session_id is an
+// optional override resolving to the latest open session otherwise, so a typical
+// fix-confirmation call needs only the two run IDs.
+func diffRuns(ctx context.Context, c *daemonClient, in diffRunsIn) (store.RunDiff, error) {
+	sessionID := in.SessionID
+	if sessionID == "" {
+		sess, err := c.resumeLatest(ctx)
+		if err != nil {
+			return store.RunDiff{}, fmt.Errorf("diff_runs: %w", err)
+		}
+		sessionID = sess.ID
+	}
+	diff, err := c.diffRuns(ctx, sessionID, in.RunA, in.RunB)
+	if err != nil {
+		return store.RunDiff{}, fmt.Errorf("diff_runs: %w", err)
+	}
+	return diff, nil
 }
 
 // --- report_observation: the field-notes channel (field-notes D2/D3) ---

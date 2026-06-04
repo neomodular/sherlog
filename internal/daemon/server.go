@@ -209,11 +209,17 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// Recall runs against the new bug description so debug_start can surface
+	// possibly-related solved cases (case-recall spec). It is computed daemon-side
+	// because the store owns closed-case history (design D2); the result is an
+	// advisory lead the skill cites, never evidence.
+	related := s.store.Recall(req.Description)
 	// Skill preferences ride the create-session response so the plugin never reads
 	// the filesystem (design D4): debug_start forwards this block to the skill.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session":           created,
 		"existing_same_cwd": existing, // non-nil warns the caller of a concurrent session
+		"related_cases":     related,  // possibly-related closed cases (case-recall)
 		"preferences": map[string]string{
 			"verbosity": s.cfg.Verbosity,
 			"color":     s.cfg.Color,
@@ -295,7 +301,24 @@ func (s *Server) sessionRoot(w http.ResponseWriter, r *http.Request, id string) 
 		}
 		writeJSON(w, http.StatusOK, sess)
 	case http.MethodDelete:
-		unremoved, err := s.store.CloseSession(id)
+		// An optional resolution body records why/how the case closed (D4). An empty
+		// body (legacy callers) closes the case unsolved; an all-empty resolution is
+		// likewise treated as unsolved by the store, so older debug_end callers keep
+		// working unchanged (mcp-server spec: backward compatible).
+		var req struct {
+			RootCause             string `json:"root_cause"`
+			FixSummary            string `json:"fix_summary"`
+			ConfirmedHypothesisID string `json:"confirmed_hypothesis_id"`
+		}
+		if !readJSON(w, r, &req) {
+			return
+		}
+		res := &store.Resolution{
+			RootCause:             req.RootCause,
+			FixSummary:            req.FixSummary,
+			ConfirmedHypothesisID: req.ConfirmedHypothesisID,
+		}
+		unremoved, err := s.store.CloseSessionWithResolution(id, res)
 		if errors.Is(err, store.ErrSessionNotFound) {
 			writeError(w, http.StatusNotFound, err)
 			return

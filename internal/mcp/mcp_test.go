@@ -131,12 +131,12 @@ func TestEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(tools.Tools) != 11 {
+	if len(tools.Tools) != 12 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("tool count = %d, want 11: %v", len(tools.Tools), names)
+		t.Fatalf("tool count = %d, want 12: %v", len(tools.Tools), names)
 	}
 
 	// debug_start: session + probe contract.
@@ -346,6 +346,113 @@ func TestReportObservationFireAndForget(t *testing.T) {
 	_ = json.Unmarshal(raw, &out)
 	if out.Filed {
 		t.Error("filed = true with no daemon reachable; want false")
+	}
+}
+
+// TestCaseLifecycleRecallAndDiff is the task 3.3 E2E: a simulated case is solved
+// with a recorded resolution, a fresh debug_start with a similar description
+// recalls it through the related-cases section, and diff_runs across that new
+// case's reproduce and fixed-check runs flags the probe that stopped firing.
+func TestCaseLifecycleRecallAndDiff(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	base, port := startTestDaemon(t)
+	sess := connectMCP(t, ctx, base, port)
+	call := newAwaitCaller(ctx, sess)
+
+	// --- Case 1: solve it and record a resolution (recall material). ---
+	var first debugStartOut
+	callTool(t, ctx, sess, "debug_start",
+		map[string]any{"bug_description": "checkout total off by a cent on discounted carts"}, &first)
+	if len(first.RelatedCases) != 0 {
+		t.Fatalf("first case should have no recall matches in an empty archive: %+v", first.RelatedCases)
+	}
+	var board1 setHypothesesOut
+	callTool(t, ctx, sess, "set_hypotheses", map[string]any{
+		"session_id": first.SessionID,
+		"hypotheses": []string{"float rounding in discount calc", "stale price cache", "tax applied twice"},
+	}, &board1)
+	callTool(t, ctx, sess, "update_hypothesis", map[string]any{
+		"session_id": first.SessionID, "id": "h1", "status": "confirmed", "note": "probe showed .005 truncation",
+	}, nil)
+
+	// Close it solved: root cause + fix summary + confirmed hypothesis feed recall.
+	var end1 debugEndOut
+	callTool(t, ctx, sess, "debug_end", map[string]any{
+		"session_id":              first.SessionID,
+		"root_cause":              "float rounding in discount calc",
+		"fix_summary":             "switched discount math to integer cents",
+		"confirmed_hypothesis_id": "h1",
+	}, &end1)
+	if !end1.CleanupComplete {
+		t.Fatalf("case 1 had no probes; cleanup should be complete: %+v", end1)
+	}
+
+	// --- Case 2: a similar symptom must recall case 1. ---
+	var second debugStartOut
+	callTool(t, ctx, sess, "debug_start",
+		map[string]any{"bug_description": "discount totals wrong by a cent on some carts"}, &second)
+	if len(second.RelatedCases) == 0 {
+		t.Fatal("recall returned no related cases for a similar discount bug")
+	}
+	got := second.RelatedCases[0]
+	if got.SessionID != first.SessionID {
+		t.Errorf("recall top match = %q, want case 1 %q", got.SessionID, first.SessionID)
+	}
+	if got.RootCause != "float rounding in discount calc" || got.FixSummary != "switched discount math to integer cents" {
+		t.Errorf("recall match missing resolution fields: %+v", got)
+	}
+
+	// Probe p1 discriminates the suspect in case 2.
+	var probe store.Probe
+	callTool(t, ctx, sess, "register_probe", map[string]any{
+		"session_id": second.SessionID, "id": "p1", "file": "discount.go", "line": 88, "hypothesis_id": "h1",
+	}, &probe)
+
+	// Run 1: reproduce — the buggy path fires p1.
+	done1 := make(chan struct{})
+	go func() {
+		_, _ = call("await_run", map[string]any{"session_id": second.SessionID, "timeout_s": 10})
+		close(done1)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	for i := 0; i < 4; i++ {
+		firePoke(t, base, second.SessionID, "p1")
+	}
+	<-done1
+	var reproRun store.Run
+	callTool(t, ctx, sess, "close_run", map[string]any{"session_id": second.SessionID, "verdict": "reproduced"}, &reproRun)
+
+	// Run 2: fixed-check — the fix removed the bad branch, so p1 never fires.
+	done2 := make(chan struct{})
+	go func() {
+		_, _ = call("await_run", map[string]any{"session_id": second.SessionID, "timeout_s": 1})
+		close(done2)
+	}()
+	<-done2
+	var fixedRun store.Run
+	callTool(t, ctx, sess, "close_run", map[string]any{"session_id": second.SessionID, "verdict": "fixed-check"}, &fixedRun)
+
+	// --- diff_runs across the reproduce and fixed-check runs. ---
+	var diff store.RunDiff
+	callTool(t, ctx, sess, "diff_runs", map[string]any{
+		"session_id": second.SessionID, "run_a": reproRun.ID, "run_b": fixedRun.ID,
+	}, &diff)
+	if len(diff.Probes) == 0 {
+		t.Fatal("diff_runs returned no probe comparisons")
+	}
+	// p1 fired in the reproduce run but not the fixed-check run: divergent, pinned
+	// first, with the reproduce side carrying its four hits.
+	top := diff.Probes[0]
+	if top.Probe != "p1" || !top.Divergent {
+		t.Fatalf("expected p1 flagged divergent first, got %+v", top)
+	}
+	if top.A.Run != reproRun.ID || top.A.Total != 4 || !top.A.Fired {
+		t.Errorf("reproduce side wrong: %+v", top.A)
+	}
+	if top.B.Run != fixedRun.ID || top.B.Fired {
+		t.Errorf("fixed-check side should show p1 not firing: %+v", top.B)
 	}
 }
 

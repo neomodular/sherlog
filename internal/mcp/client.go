@@ -190,9 +190,10 @@ func (c *daemonClient) health(ctx context.Context) (healthInfo, error) {
 // createSessionResult mirrors the daemon's create-session response. Preferences
 // ride this response (design D4) so the plugin never reads the config file.
 type createSessionResult struct {
-	Session         *store.Session `json:"session"`
-	ExistingSameCWD *store.Session `json:"existing_same_cwd"`
-	Preferences     preferences    `json:"preferences"`
+	Session         *store.Session      `json:"session"`
+	ExistingSameCWD *store.Session      `json:"existing_same_cwd"`
+	RelatedCases    []store.RecallMatch `json:"related_cases"` // possibly-related closed cases (case-recall)
+	Preferences     preferences         `json:"preferences"`
 }
 
 // preferences is the skill-presentation block delivered through debug_start
@@ -231,9 +232,32 @@ type closeSessionResult struct {
 	UnremovedProbes []store.Probe `json:"unremoved_probes"`
 }
 
-func (c *daemonClient) closeSession(ctx context.Context, id string) (closeSessionResult, error) {
+// closeSession closes a session, optionally recording its resolution (D4). A nil
+// resolution sends no body, closing the case unsolved; the daemon treats an
+// all-empty resolution as unsolved too, so existing callers stay unaffected.
+func (c *daemonClient) closeSession(ctx context.Context, id string, res *store.Resolution) (closeSessionResult, error) {
+	var body any
+	if res != nil {
+		body = map[string]any{
+			"root_cause":              res.RootCause,
+			"fix_summary":             res.FixSummary,
+			"confirmed_hypothesis_id": res.ConfirmedHypothesisID,
+		}
+	}
 	var out closeSessionResult
-	err := c.call(ctx, http.MethodDelete, "/api/sessions/"+id, nil, &out)
+	err := c.call(ctx, http.MethodDelete, "/api/sessions/"+id, body, &out)
+	return out, err
+}
+
+// diffRuns fetches the per-probe comparison of two runs of a session for the
+// diff_runs tool (log-query spec: Run diff). The daemon validates the run pair and
+// returns divergent probes first.
+func (c *daemonClient) diffRuns(ctx context.Context, id, runA, runB string) (store.RunDiff, error) {
+	q := url.Values{}
+	q.Set("a", runA)
+	q.Set("b", runB)
+	var out store.RunDiff
+	err := c.call(ctx, http.MethodGet, "/api/sessions/"+id+"/diff?"+q.Encode(), nil, &out)
 	return out, err
 }
 
