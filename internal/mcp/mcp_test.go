@@ -1,0 +1,256 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"testing"
+	"time"
+
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/neomodular/sherlog/internal/daemon"
+	"github.com/neomodular/sherlog/internal/store"
+)
+
+// startTestDaemon starts a real daemon HTTP server on a free loopback port over a
+// temp-dir store and returns its base URL plus the bound port. The server is shut
+// down on test cleanup. This is the same surface the MCP client talks to in
+// production (D2), so the test exercises the full client → daemon → store path.
+func startTestDaemon(t *testing.T) (base, port string) {
+	t.Helper()
+	st, err := store.New(store.WithRoot(t.TempDir()))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	_, port, err = net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+
+	srv := &http.Server{Handler: daemon.NewServer(st, "test")}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	return "http://" + ln.Addr().String(), port
+}
+
+// connectMCP wires an in-process MCP server (full tool surface) to a client over
+// the SDK's in-memory transport, pointing the daemon client at base. It returns
+// the connected client session.
+func connectMCP(t *testing.T, ctx context.Context, base, port string) *mcpsdk.ClientSession {
+	t.Helper()
+	c := &daemonClient{
+		base:      base,
+		port:      port,
+		http:      &http.Client{Timeout: 10 * time.Second},
+		awaitHTTP: &http.Client{},
+	}
+
+	server := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "sherlog", Version: "test"}, nil)
+	registerTools(server, c)
+
+	st, ct := mcpsdk.NewInMemoryTransports()
+	if _, err := server.Connect(ctx, st, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "test"}, nil)
+	sess, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+	return sess
+}
+
+// callTool invokes a tool and decodes its structured output into out. It fails
+// the test on a protocol error or a tool error (IsError), surfacing the message.
+func callTool(t *testing.T, ctx context.Context, sess *mcpsdk.ClientSession, name string, args, out any) {
+	t.Helper()
+	res, err := sess.CallTool(ctx, &mcpsdk.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("%s: protocol error: %v", name, err)
+	}
+	if res.IsError {
+		msg := ""
+		if len(res.Content) > 0 {
+			if tc, ok := res.Content[0].(*mcpsdk.TextContent); ok {
+				msg = tc.Text
+			}
+		}
+		t.Fatalf("%s: tool error: %s", name, msg)
+	}
+	if out == nil {
+		return
+	}
+	// StructuredContent is the typed Out value (ToolHandlerFor populates it);
+	// round-trip through JSON to decode into the test's expected shape.
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("%s: marshal structured content: %v", name, err)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		t.Fatalf("%s: decode structured content: %v\nraw: %s", name, err, raw)
+	}
+}
+
+// firePoke POSTs a probe hit directly to the daemon's ingest endpoint, simulating
+// a probe line in the user's code (D3: text/plain simple request, no JSON type).
+func firePoke(t *testing.T, base, sessionID, probeID string) {
+	t.Helper()
+	resp, err := http.Post(base+"/log/"+sessionID+"/"+probeID, "", nil) //nolint:noctx
+	if err != nil {
+		t.Fatalf("probe POST: %v", err)
+	}
+	_ = resp.Body.Close()
+}
+
+// TestEndToEnd drives the full MCP surface against a live daemon: handshake →
+// debug_start → hypotheses + probe registry → simulated probe POSTs → await_run
+// → close_run → query_logs → debug_end, asserting the evidence trail at each step
+// (task 4.6).
+func TestEndToEnd(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	base, port := startTestDaemon(t)
+	sess := connectMCP(t, ctx, base, port)
+
+	// Handshake produced the tool list.
+	tools, err := sess.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	if len(tools.Tools) != 10 {
+		names := make([]string, len(tools.Tools))
+		for i, tl := range tools.Tools {
+			names[i] = tl.Name
+		}
+		t.Fatalf("tool count = %d, want 10: %v", len(tools.Tools), names)
+	}
+
+	// debug_start: session + probe contract.
+	var start debugStartOut
+	callTool(t, ctx, sess, "debug_start", map[string]any{"bug_description": "login hangs"}, &start)
+	if start.SessionID == "" {
+		t.Fatal("debug_start: empty session ID")
+	}
+	if start.ProbeContract.OneLiners["js"] == "" || start.ProbeContract.OneLiners["curl"] == "" {
+		t.Fatalf("debug_start: missing probe one-liners: %+v", start.ProbeContract.OneLiners)
+	}
+	sid := start.SessionID
+
+	// set_hypotheses: three suspects.
+	var board setHypothesesOut
+	callTool(t, ctx, sess, "set_hypotheses", map[string]any{
+		"session_id": sid,
+		"hypotheses": []string{"token refresh deadlocks", "DB pool exhausted", "retry loop never exits"},
+	}, &board)
+	if len(board.Board) != 3 || board.Board[0].ID != "h1" {
+		t.Fatalf("set_hypotheses: got %+v", board.Board)
+	}
+
+	// register_probe for the suspect we will gather evidence on.
+	var probe store.Probe
+	callTool(t, ctx, sess, "register_probe", map[string]any{
+		"session_id": sid, "id": "p1", "file": "auth.go", "line": 42, "hypothesis_id": "h1",
+	}, &probe)
+	if probe.ID != "p1" || probe.Removed {
+		t.Fatalf("register_probe: got %+v", probe)
+	}
+
+	// await_run in the background while probes fire, mirroring the real loop where
+	// the user reproduces the bug during the wait (D8).
+	type awaitOutcome struct {
+		res awaitRunResult
+		err error
+	}
+	done := make(chan awaitOutcome, 1)
+	go func() {
+		r, e := newAwaitCaller(ctx, sess)("await_run", map[string]any{"session_id": sid, "timeout_s": 10})
+		done <- awaitOutcome{r, e}
+	}()
+
+	// Give await a moment to open the run, then fire probe hits.
+	time.Sleep(50 * time.Millisecond)
+	for i := 0; i < 3; i++ {
+		firePoke(t, base, sid, "p1")
+	}
+
+	out := <-done
+	if out.err != nil {
+		t.Fatalf("await_run: %v", out.err)
+	}
+	if out.res.Reason != "quiet" {
+		t.Fatalf("await_run reason = %q, want quiet (probes fired)", out.res.Reason)
+	}
+	// The summary must list p1 with the three hits.
+	var p1 *store.ProbeSummary
+	for i := range out.res.Summary {
+		if out.res.Summary[i].Probe == "p1" {
+			p1 = &out.res.Summary[i]
+		}
+	}
+	if p1 == nil || p1.Total != 3 {
+		t.Fatalf("await_run summary for p1 = %+v (want total 3)", p1)
+	}
+	runID := out.res.Run.ID
+
+	// close_run with a verdict.
+	var run store.Run
+	callTool(t, ctx, sess, "close_run", map[string]any{"session_id": sid, "verdict": "reproduced"}, &run)
+	if run.Verdict != store.VerdictReproduced || run.ClosedAt == nil {
+		t.Fatalf("close_run: got %+v", run)
+	}
+
+	// query_logs: counts for p1 in the run.
+	var q queryLogsOut
+	callTool(t, ctx, sess, "query_logs", map[string]any{"session_id": sid, "probe": "p1", "run": runID}, &q)
+	if len(q.Results) != 1 || q.Results[0].Total != 3 {
+		t.Fatalf("query_logs: got %+v", q.Results)
+	}
+
+	// debug_end: p1 was never marked removed, so it must appear in the checklist
+	// with file+line and a greppable fragment (D10).
+	var end debugEndOut
+	callTool(t, ctx, sess, "debug_end", map[string]any{"session_id": sid}, &end)
+	if end.CleanupComplete {
+		t.Fatal("debug_end: cleanup should be incomplete with an unremoved probe")
+	}
+	if len(end.UnremovedProbes) != 1 || end.UnremovedProbes[0].File != "auth.go" {
+		t.Fatalf("debug_end unremoved = %+v", end.UnremovedProbes)
+	}
+	wantFrag := base + "/log/" + sid + "/"
+	if end.GreppableFragment != wantFrag {
+		t.Fatalf("debug_end fragment = %q, want %q", end.GreppableFragment, wantFrag)
+	}
+}
+
+// newAwaitCaller returns a helper that calls a tool and decodes an awaitRunResult,
+// usable from a goroutine (it returns the result and error instead of failing the
+// test directly, since t.Fatalf from a non-test goroutine is unsafe).
+func newAwaitCaller(ctx context.Context, sess *mcpsdk.ClientSession) func(string, any) (awaitRunResult, error) {
+	return func(name string, args any) (awaitRunResult, error) {
+		res, err := sess.CallTool(ctx, &mcpsdk.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			return awaitRunResult{}, err
+		}
+		var out awaitRunResult
+		raw, err := json.Marshal(res.StructuredContent)
+		if err != nil {
+			return awaitRunResult{}, err
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return awaitRunResult{}, err
+		}
+		return out, nil
+	}
+}

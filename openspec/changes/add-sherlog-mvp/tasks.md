@@ -27,16 +27,16 @@
 
 ## 4. MCP Server (mcp-server)
 
-- [ ] 4.1 Implement `sherlog mcp` stdio mode with server info (version) and tool registration
-- [ ] 4.2 Implement daemon health-check + detached auto-spawn on startup/first tool call; foreign-port error path
-- [ ] 4.3 Implement tools: `debug_start` (returns session ID, probe URL template, canonical per-language probe one-liners), `debug_resume`, `debug_end` (cleanup checklist + greppable fragment)
-- [ ] 4.4 Implement tools: `set_hypotheses`, `update_hypothesis`, `register_probe`, `remove_probe`
-- [ ] 4.5 Implement tools: `await_run` (default 120s, re-invocable/re-attaching), `close_run`, `query_logs`
-- [ ] 4.6 End-to-end test: MCP handshake → debug_start → simulated probe POSTs → await_run → query → debug_end via a scripted client
+- [x] 4.1 Implement `sherlog mcp` stdio mode with server info (version) and tool registration
+- [x] 4.2 Implement daemon health-check + detached auto-spawn on startup/first tool call; foreign-port error path
+- [x] 4.3 Implement tools: `debug_start` (returns session ID, probe URL template, canonical per-language probe one-liners), `debug_resume`, `debug_end` (cleanup checklist + greppable fragment)
+- [x] 4.4 Implement tools: `set_hypotheses`, `update_hypothesis`, `register_probe`, `remove_probe`
+- [x] 4.5 Implement tools: `await_run` (default 120s, re-invocable/re-attaching), `close_run`, `query_logs`
+- [x] 4.6 End-to-end test: MCP handshake → debug_start → simulated probe POSTs → await_run → query → debug_end via a scripted client
 
 ## 5. CLI Utilities
 
-- [ ] 5.1 Implement `sherlog probes --stale` (unremoved probes across all sessions with session/file/line) and `sherlog --version`
+- [x] 5.1 Implement `sherlog probes --stale` (unremoved probes across all sessions with session/file/line) and `sherlog --version`
 
 ## 6. Plugin + Skill (debug-skill)
 

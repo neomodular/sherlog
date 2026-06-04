@@ -6,12 +6,15 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"text/tabwriter"
 
 	"github.com/neomodular/sherlog/internal/daemon"
 	"github.com/neomodular/sherlog/internal/mcp"
+	"github.com/neomodular/sherlog/internal/store"
 )
 
 // version is overridden at release time via -ldflags (D14: binary and plugin
@@ -53,10 +56,39 @@ func run(args []string) error {
 	}
 }
 
-// cmdProbes is the `sherlog probes` subcommand. The --stale listing (D10) lands
-// in task group 5; this stub keeps the dispatch surface complete and buildable.
-func cmdProbes(_ []string) error {
-	return fmt.Errorf("probes: not implemented yet (task group 5)")
+// cmdProbes is the `sherlog probes` subcommand. With --stale it lists every
+// probe registered but not yet marked removed across all sessions — the
+// "weeks later" orphaned-probe safety net (D10). It reads the persisted store
+// directly rather than the daemon so it works even when no daemon is running.
+func cmdProbes(args []string) error {
+	fs := flag.NewFlagSet("probes", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	stale := fs.Bool("stale", false, "list probes registered but not yet removed")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !*stale {
+		return fmt.Errorf("probes: specify --stale (the only supported mode)")
+	}
+
+	st, err := store.New()
+	if err != nil {
+		return fmt.Errorf("probes: open store: %w", err)
+	}
+
+	staleProbes := st.StaleProbes()
+	if len(staleProbes) == 0 {
+		fmt.Println("no stale probes — every registered probe has been removed")
+		return nil
+	}
+
+	// Tab-aligned columns so leftover probes are easy to scan and act on (D10).
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "SESSION\tPROBE\tFILE\tLINE")
+	for _, sp := range staleProbes {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", sp.SessionID, sp.Probe.ID, sp.Probe.File, sp.Probe.Line)
+	}
+	return tw.Flush()
 }
 
 func usage(w *os.File) {
