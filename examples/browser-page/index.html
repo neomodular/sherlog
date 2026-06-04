@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>browser-page — seeded DOM/fetch bug</title>
+  </head>
+  <body>
+    <!--
+      SEEDED BUG (dogfood for /debug):
+
+      Symptom: clicking "Load profile" leaves the name as "—" (nothing renders)
+      even though the network call succeeds.
+
+      Root cause: the fetch response is read with res.text() and then the code
+      reads parsed.name on the raw string (never JSON.parsed) — so `name` is
+      undefined and the DOM stays blank. A real investigation should also weigh
+      rivals: the request failing, or the wrong DOM element id.
+
+      No sherlog probes are present — add them live via /debug. Browser probes
+      are the headline case: a one-line fetch() to 127.0.0.1:2218 with NO JSON
+      content-type, so there is no CORS preflight.
+    -->
+    <button id="load">Load profile</button>
+    <p>Name: <span id="name">—</span></p>
+
+    <script>
+      // Stands in for a backend; returns a JSON string.
+      function fakeApi() {
+        return Promise.resolve(
+          new Response('{"name":"Ada Lovelace"}', { status: 200 })
+        );
+      }
+
+      document.getElementById("load").addEventListener("click", async () => {
+        const res = await fakeApi();
+        // BUG: read as text, then treated as if it were a parsed object.
+        const parsed = await res.text();
+        document.getElementById("name").textContent = parsed.name ?? "—";
+      });
+    </script>
+  </body>
+</html>

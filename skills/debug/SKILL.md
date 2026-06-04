@@ -1,10 +1,261 @@
 ---
 name: debug
-description: Placeholder — the detective debug loop is authored in task group 6.
+description: Hypothesis-driven debugging via the sherlog daemon. Use when the user reports a bug, says "debug this", "/debug", "why does X fail", "track down", or asks to investigate flaky/intermittent behavior. Drives a detective loop — at least 3 suspects, one discriminating probe each, a blocking wait while the user reproduces, evidence-based elimination, fix, fix-check run, and guaranteed probe cleanup. "/debug resume" continues a prior investigation.
 ---
 
-# /debug (placeholder)
+# /debug — the detective loop
 
-The full detective loop skill (hypotheses, discriminating probes, blocking
-await, fix verification, cleanup gate, branded mascot) is written in task
-group 6. See design decisions D11–D12.
+You are the detective. The sherlog daemon is Watson: it watches port 2218,
+records evidence, and holds the case board. **The daemon board is the single
+source of truth — never reason from conversation memory about which suspects are
+alive, where probes are, or what runs found.** After `/clear`, compaction, a
+crash, or days later, the board is what survives. Read it; do not remember it.
+
+All state lives behind MCP tools (`debug_start`, `set_hypotheses`,
+`register_probe`, `await_run`, `close_run`, `query_logs`, `update_hypothesis`,
+`remove_probe`, `debug_end`, `debug_resume`). Pass the `session_id` from
+`debug_start` to every subsequent call.
+
+## The loop at a glance
+
+```
+gather context → debug_start → ≥3 suspects (set_hypotheses)
+→ ≥1 discriminating probe per suspect (register_probe) → print banner
+→ "the game is afoot" → user reproduces → await_run → close_run(verdict)
+→ analyze summary → kill / refine / split suspects (update_hypothesis + notes)
+→ iterate until one confirmed → fix → fixed-check run → "elementary."
+→ debug_end → remove every probe → grep = 0 matches → "case closed"
+```
+
+---
+
+## 1 · Open the case
+
+1. **Gather bug context first.** Get the symptom, how to reproduce it, and which
+   files/area are involved. If the report is vague ("login is broken"), ask one
+   or two sharp questions before starting — a good investigation needs a
+   reproducible symptom.
+2. Call `debug_start(bug_description)`. It returns:
+   - `session_id` — thread it through every later call.
+   - `probe_contract` — the `url_template` (`http://127.0.0.1:2218/log/<session>/<probe>`),
+     a one-line `note`, and `one_liners` per language (js, python, go, ruby, curl).
+   - `warn_same_cwd` — if non-null, **another open session already exists for this
+     directory.** Warn the user (do not block): "There's already an open sherlog
+     case (#<id>) for this folder — continuing as a separate investigation. Run
+     `/debug resume` instead if you meant to pick that one up." Then proceed.
+
+## 2 · Name the suspects (≥3)
+
+Form **at least three distinct hypotheses** for the root cause, then commit them
+with `set_hypotheses(session_id, hypotheses=[...])`. They come back as `h1, h2,
+h3, …`, all `active`.
+
+Make them genuinely different mechanisms, not three flavours of one guess. For
+"login fails intermittently": h1 race between token refresh and request; h2 stale
+session cache; h3 connection-pool exhaustion under load. Breadth here is what
+makes the evidence decisive later.
+
+## 3 · Plant discriminating probes (≥1 per suspect)
+
+For **every** hypothesis, place at least one probe whose output *distinguishes
+that suspect from its rivals* — not a mere "execution reached here" marker. A
+probe is discriminating when its payload would look different depending on which
+hypothesis is true.
+
+> h1 (race) vs h2 (stale cache): one probe posting
+> `{token, token_age_ms, cache_age_ms, t}` settles both — a null/expired token
+> with a fresh cache points at the race; a populated token with a stale cache
+> points at the cache. One line, two suspects discriminated.
+
+**Probe rules (binding):**
+
+- **One fire-and-forget line.** Take the form from `probe_contract.one_liners`
+  for the language. Prefer whatever HTTP facility the codebase already uses.
+- **Never await it, never let it throw.** The JS form ends in `.catch(() => {})`;
+  Go runs it in a goroutine; Python/Ruby swallow exceptions; curl backgrounds and
+  silences. The probe must never block or break the host app.
+- **Never set a JSON `Content-Type`.** Bodies go as default `text/plain` so
+  browser probes stay CORS "simple requests" with no preflight. The daemon parses
+  the body as JSON anyway and falls back to a raw string — a probe can't fail
+  validation. (If you ever hand-write a probe, do not add headers.)
+- **No new imports or wrappers** where the language allows a bare call. Put the
+  discriminating values directly in the body: `JSON.stringify({token, age, t})`.
+- Use a distinct probe ID per location: `p1, p2, p3, …`. Substitute it for
+  `<probe>` in the URL template.
+
+After editing each probe into the code, **register it**:
+`register_probe(session_id, id="p1", file="src/auth.js", line=42,
+hypothesis_id="h1", note="posts token + cache age to split race vs stale")`.
+Registration is the cleanup guarantee — an unregistered probe is an orphan.
+
+## 4 · The game is afoot — reproduce and wait
+
+1. Print the banner (section "Branded presentation"), then say **"the game is
+   afoot"** and ask the user to reproduce the bug now. If probes were added to a
+   compiled or bundled app, remind them to **rebuild/restart** so the new lines
+   run.
+2. Call `await_run(session_id)` (default 120s). It opens a run, blocks until probe
+   activity goes quiet (~2s debounce) after first firing, or returns at timeout.
+   **You suspend here — do not ask the user to "type done".** The result has:
+   - `run` (with its `id`), `reason` (`quiet` | `timeout` | `deadline`),
+     `total_seen`, and `summary`: one entry per registered probe with
+     `total` (true count, `0` if it never fired), `truncated`, and sampled
+     `events`.
+3. **Slow reproduction?** If `reason` is `timeout`/`deadline` and the user is
+   still working, just call `await_run(session_id)` again — it re-attaches to the
+   same open run. Repeat as needed.
+4. When the user has finished the attempt, ask for the **verdict** and record it:
+   `close_run(session_id, verdict=...)` — `reproduced`, `not-reproduced`, or
+   (later) `fixed-check`. Always ask; never assume the outcome.
+
+### Zero-event guard (do this before blaming any suspect)
+
+If `await_run` returns with `total_seen == 0` / every probe `total: 0` **but the
+user says they reproduced the bug**, the problem is almost certainly the wiring,
+not the hypotheses. Do **not** kill suspects. Check, in order:
+
+1. **Daemon connectivity** — is the daemon answering? `curl -s
+   http://127.0.0.1:2218/health` should return JSON with a `version`. No
+   response → the daemon isn't running or the MCP server couldn't spawn it;
+   suggest restarting the MCP server / re-invoking a tool to trigger auto-spawn,
+   and (if `SHERLOG_PORT` is set) curl that port instead.
+2. **Probe execution** — did the app actually run the new lines? A bundled/compiled
+   app needs a **rebuild/restart**; the code path may not have been hit; the probe
+   line may be after an early return/throw.
+3. Only once probes demonstrably fire do run results speak to the hypotheses.
+
+## 5 · Read the evidence; kill, refine, split
+
+Inspect the per-probe summary (and `query_logs(session_id, probe=..., run=...)`
+for detail — counts plus first/last samples, truncation always disclosed). Then
+act on the board, **always with an evidence note that cites the probe and run**:
+
+- **Kill** a suspect the evidence refutes:
+  `update_hypothesis(session_id, "h2", "killed", "p4 in run r2 shows cache_age_ms
+  =12 — cache was fresh, not stale")`.
+- **Confirm** the one the evidence proves:
+  `update_hypothesis(session_id, "h1", "confirmed", "p1 in r2: token=null,
+  token_age_ms past TTL while request fired — the race")`.
+- **Refine / split**: if evidence reshapes a suspect or reveals two mechanisms
+  hiding under one, update its statement or call `set_hypotheses` again to add the
+  new suspect(s) and re-probe. A probe that fired **zero times** (`total: 0`) is
+  itself evidence — the code path wasn't taken (after the zero-event guard clears
+  connectivity).
+
+Iterate steps 3–5 — add or move probes, run again — until exactly one hypothesis
+is `confirmed` by probe evidence. Do not declare a winner on a hunch.
+
+## 6 · Fix, then verify with a fixed-check run
+
+1. Apply the fix for the confirmed hypothesis.
+2. Predict, out loud, how the evidence *should* change ("p1's token will now be
+   populated; the error-path probe p5 will fire zero times").
+3. Ask the user to retest; `await_run(session_id)`; then `close_run(session_id,
+   verdict="fixed-check")`.
+4. Confirm the failure signature changed **as predicted** via the probe summary /
+   `query_logs`, *and* the user reports the bug is gone. Only with both: say
+   **"elementary."** and go to cleanup. If the signature didn't change, the fix is
+   wrong or the cause is misidentified — reopen the board.
+
+## 7 · Cleanup gate — case closed only when clean
+
+The probe URL is its own marker, so leftover probes are always findable.
+
+1. `debug_end(session_id)` → `unremoved_probes` (each with `file` + `line`),
+   `greppable_fragment` (`…/log/<session>/`), and `cleanup_complete`.
+2. **Remove every listed probe line** from the code. After deleting each,
+   `remove_probe(session_id, id)`.
+3. **Grep gate (mandatory):** search the repo for the session fragment and require
+   **zero matches** before declaring the case closed:
+
+   ```
+   grep -rn "2218/log/<session-id>" .
+   ```
+
+   If `SHERLOG_PORT` was overridden, the URL carries that port — grep the actual
+   `greppable_fragment` returned by `debug_end` (it already contains the right
+   host:port). If any match remains, remove it, `remove_probe` it, and grep again.
+4. Only with zero matches: **"case closed · all N probes removed"**.
+
+> Safety net for later: `sherlog probes --stale` lists any registered-but-not-
+> removed probes across all sessions, even weeks afterward.
+
+---
+
+## Resuming an investigation (`/debug resume`)
+
+When invoked as resume (or any time you've lost the thread):
+
+1. `debug_resume(session_id?)` — omit the ID for the latest open session, or pass
+   a specific one. It returns the full `Session`: `description`, the hypothesis
+   board (`hypotheses` with `status` + `note`), the probe registry (`probes` with
+   `file`/`line`/`removed`), and `runs` (with `verdict`s).
+2. **Restate from the board, not from memory**: the bug, the surviving (`active`)
+   suspects, where the live probes are, and what the runs concluded.
+3. Continue at the right stage: still gathering evidence → another `await_run`;
+   one suspect confirmed → fix; fix applied → fixed-check; everything verified →
+   cleanup gate. Pick up exactly where the board left off.
+
+---
+
+## Branded presentation
+
+Print this banner at session start and at major transitions. **The sprite art
+never changes between states — only the status line text does.**
+
+When the terminal supports ANSI color, render the **cap navy** and the **body
+coral** (leave the eye/background glyphs untouched). The sprite, character for
+character:
+
+```
+     ▄▄▄▄
+ ▄▄████████▄▄
+   ▐▛███▜▌
+  ▝▜█████▛▘
+    ▘▘ ▝▝
+```
+
+Colorization (truecolor; cap = navy `38;2;30;58;110`, body = coral
+`38;2;255;111;97`):
+
+```
+\e[38;2;30;58;110m     ▄▄▄▄\e[0m
+\e[38;2;30;58;110m ▄▄████████▄▄\e[0m
+\e[38;2;255;111;97m   ▐▛███▜▌\e[0m
+\e[38;2;255;111;97m  ▝▜█████▛▘\e[0m
+\e[38;2;255;111;97m    ▘▘ ▝▝\e[0m
+```
+
+**Plain fallback** (no-color terminals, logs, or when color is unwanted): print
+the exact same sprite with no escape codes. Never substitute different glyphs.
+
+**Status line** (immediately under the sprite), exactly this shape:
+
+```
+sherlog · case #<id> · N suspects · M probes · watching :2218
+```
+
+`<id>` is the `session_id`; `N` = active suspects on the board; `M` = registered
+probes not yet removed; the port is the daemon's (use the actual port if
+`SHERLOG_PORT` is set).
+
+**Vocabulary** (use these exact phrases for the matching transitions, nothing
+else):
+
+- **"the game is afoot"** — when awaiting reproduction (entering `await_run`).
+- **"elementary."** — only when the root cause is confirmed by probe evidence.
+- **"case closed"** — only after the cleanup grep returns zero matches.
+
+---
+
+## Discipline checklist
+
+- [ ] ≥3 distinct suspects on the board before any probe.
+- [ ] ≥1 *discriminating* probe per suspect, each `register_probe`'d with file+line+hypothesis.
+- [ ] Probes: one line, fire-and-forget, no JSON content-type, no new imports/wrappers.
+- [ ] Block on `await_run`; ask for the verdict; never assume it.
+- [ ] Zero events + "I reproduced it" → connectivity/probe-wiring check, not suspect-killing.
+- [ ] Every kill/confirm carries an evidence note citing probe + run.
+- [ ] Fix verified by a `fixed-check` run whose signature changed as predicted.
+- [ ] `debug_end` → remove all probes → grep fragment = 0 matches → "case closed".
+- [ ] State read from the daemon board, never from conversation memory.

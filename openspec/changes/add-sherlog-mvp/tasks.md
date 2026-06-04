@@ -40,9 +40,9 @@
 
 ## 6. Plugin + Skill (debug-skill)
 
-- [ ] 6.1 Write `.claude-plugin/plugin.json` and `.mcp.json` (launches `sherlog mcp`); validate plugin loads in Claude Code
-- [ ] 6.2 Write `skills/debug/SKILL.md`: full detective loop per spec — ≥3 suspects, discriminating-probe rule, probe one-liner forms per language (fire-and-forget, no imports/wrappers, no JSON content-type), await/verdict interaction, zero-event connectivity check, kill/refine rules, fix verification via `fixed-check` run, cleanup gate (remove + grep `2218/log/<session>` = zero matches), `/debug resume` flow, same-cwd warning
-- [ ] 6.3 Add branded presentation to the skill: locked mascot sprite (exact Clawd glyphs + 2-row inspector cap), navy/coral ANSI colors with no-color fallback, status-line format, detective vocabulary ("the game is afoot" / "elementary." / "case closed")
+- [x] 6.1 Write `.claude-plugin/plugin.json` and `.mcp.json` (launches `sherlog mcp`); validate plugin loads in Claude Code
+- [x] 6.2 Write `skills/debug/SKILL.md`: full detective loop per spec — ≥3 suspects, discriminating-probe rule, probe one-liner forms per language (fire-and-forget, no imports/wrappers, no JSON content-type), await/verdict interaction, zero-event connectivity check, kill/refine rules, fix verification via `fixed-check` run, cleanup gate (remove + grep `2218/log/<session>` = zero matches), `/debug resume` flow, same-cwd warning
+- [x] 6.3 Add branded presentation to the skill: locked mascot sprite (exact Clawd glyphs + 2-row inspector cap), navy/coral ANSI colors with no-color fallback, status-line format, detective vocabulary ("the game is afoot" / "elementary." / "case closed")
 - [ ] 6.4 Manual end-to-end dogfood: seed a bug in a sample Node app and a sample browser page, run `/debug` through repro → root cause → fix → verified cleanup on both
 
 ## 7. Distribution (distribution)
