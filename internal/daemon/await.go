@@ -48,8 +48,11 @@ type awaitResult struct {
 //
 // Quiet detection works by sampling the run's total event count: once the count
 // has grown at least once (first activity), the engine returns as soon as the
-// count holds steady for the debounce window. With no activity at all it returns
-// at timeout reporting zero events so the skill can run a connectivity check.
+// count holds steady for the debounce window. Events adopted at open (fix-prerun
+// D1) count as initial activity, so an already-complete reproduction returns on
+// the debounce rather than the full timeout. With no activity at all — neither
+// adopted nor live — it returns at timeout reporting zero events so the skill can
+// run a connectivity check.
 func (e *awaitEngine) await(ctx context.Context, sessionID string, timeout time.Duration) (awaitResult, error) {
 	// Atomically open a run or re-attach to the session's already-open one, so
 	// re-invocation while a run is open is idempotent and concurrent awaits
@@ -62,7 +65,16 @@ func (e *awaitEngine) await(ctx context.Context, sessionID string, timeout time.
 	deadline := time.Now().Add(timeout)
 	baseline := e.runTotal(sessionID, run.ID) // events already attributed before this wait
 	lastCount := baseline
-	var lastChange time.Time // zero until first activity is seen
+	// lastChange marks the most recent activity; it stays zero until the first
+	// count change. A nonzero baseline means events were already attributed at
+	// open (pre-run adoption, fix-prerun D1) — that counts as initial activity, so
+	// seed lastChange to now. Otherwise a fully-adopted run whose reproduction
+	// finished before the run opened would never see a count change and would wait
+	// the entire timeout despite having a complete, correct summary.
+	var lastChange time.Time
+	if baseline > 0 {
+		lastChange = time.Now()
+	}
 
 	ticker := time.NewTicker(e.poll)
 	defer ticker.Stop()

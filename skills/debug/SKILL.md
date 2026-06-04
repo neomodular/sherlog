@@ -99,7 +99,8 @@ Registration is the cleanup guarantee — an unregistered probe is an orphan.
    **You suspend here — do not ask the user to "type done".** The result has:
    - `run` (with its `id`), `reason` (`quiet` | `timeout` | `deadline`),
      `total_seen`, and `summary`: one entry per registered probe with
-     `total` (true count, `0` if it never fired), `truncated`, and sampled
+     `total` (true count, `0` if it never fired), `adopted` (how many of `total`
+     were attributed by pre-run adoption — see below), `truncated`, and sampled
      `events`.
 3. **Slow reproduction?** If `reason` is `timeout`/`deadline` and the user is
    still working, just call `await_run(session_id)` again — it re-attaches to the
@@ -123,6 +124,29 @@ not the hypotheses. Do **not** kill suspects. Check, in order:
    app needs a **rebuild/restart**; the code path may not have been hit; the probe
    line may be after an early return/throw.
 3. Only once probes demonstrably fire do run results speak to the hypotheses.
+
+### Adopted evidence (fast reproductions that beat `await_run`)
+
+A scripted repro can finish *before* `await_run` opens the run. The daemon adopts
+those just-fired events into the run anyway, so they are not lost — and discloses
+it: a probe's `adopted` count is how many of its `total` events were attributed by
+inference (timestamp + run boundary) rather than seen live during the wait.
+`adopted == total` for a probe means **every** one of its events was inferred; a
+run whose probes are all fully adopted is an entirely inferred attribution.
+
+Treat adopted evidence as **valid but labeled** — never silently discount it,
+never blindly trust it:
+
+- **Normal runs**: adopted counts are just provenance. Read the summary as usual.
+- **Fully adopted run + a verdict that carries weight** (above all a
+  `fixed-check`): sanity-check before concluding. Are the probes you *expected*
+  this reproduction to hit actually present, and are their values plausible for
+  what you predicted? If yes, accept it and **note that attribution was
+  inferred** when you state the conclusion.
+- **Anything inconsistent** (a discriminating probe you expected is absent, or a
+  value contradicts the prediction): do **not** conclude on inferred evidence.
+  Ask the user to **reproduce once more while the run is open** (`await_run` is
+  already waiting, or call it again), then read the live result.
 
 ## 5 · Read the evidence; kill, refine, split
 
@@ -156,6 +180,11 @@ is `confirmed` by probe evidence. Do not declare a winner on a hunch.
    `query_logs`, *and* the user reports the bug is gone. Only with both: say
    **"elementary."** and go to cleanup. If the signature didn't change, the fix is
    wrong or the cause is misidentified — reopen the board.
+   - If the fixed-check summary is **fully adopted** (the repro beat `await_run`),
+     apply the adopted-evidence rule: accept it as verification only when the
+     expected probes are present and values match the prediction (say so, noting
+     the attribution was inferred); if anything is inconsistent, ask for one live
+     reproduction before declaring the fix verified.
 
 ## 7 · Cleanup gate — case closed only when clean
 
@@ -255,6 +284,7 @@ else):
 - [ ] Probes: one line, fire-and-forget, no JSON content-type, no new imports/wrappers.
 - [ ] Block on `await_run`; ask for the verdict; never assume it.
 - [ ] Zero events + "I reproduced it" → connectivity/probe-wiring check, not suspect-killing.
+- [ ] Fully adopted evidence (`adopted == total`) on a fixed-check → sanity-check, then accept with the "inferred" label or re-prompt for a live run.
 - [ ] Every kill/confirm carries an evidence note citing probe + run.
 - [ ] Fix verified by a `fixed-check` run whose signature changed as predicted.
 - [ ] `debug_end` → remove all probes → grep fragment = 0 matches → "case closed".

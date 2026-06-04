@@ -41,6 +41,12 @@ type sessionEntry struct {
 	// lock instead of the global one so a hot-loop probe (D8: 48,201 events) does
 	// not block the await engine's polling or other sessions on a file-write
 	// syscall (avoids cross-session head-of-line blocking).
+	//
+	// Acquisition discipline (fix-prerun): writers take appendMu while still
+	// holding s.mu, then release s.mu and perform the syscall under appendMu only.
+	// This pins on-disk append order to the in-memory record order set under s.mu,
+	// so an adopted orphan's event line always lands before its run's adoption
+	// marker even when ingest and run-open race.
 	appendMu sync.Mutex
 }
 
@@ -55,6 +61,56 @@ func (e *sessionEntry) recordEvent(ev LogEvent, floodN int) {
 		e.floods[key] = buf
 	}
 	buf.add(ev)
+}
+
+// hasAdoptableOrphans reports whether any retained orphan event falls in the
+// window (from, to], without mutating buffers. openNewRunLocked uses it to decide
+// whether a marker is needed and to write that marker BEFORE mutating in-memory
+// state, so a marker-write failure leaves memory and disk consistent (no adopted
+// memory without a durable marker — fix-prerun D2 atomicity).
+func (e *sessionEntry) hasAdoptableOrphans(from, to time.Time) bool {
+	for key, buf := range e.floods {
+		if key.run != "" {
+			continue
+		}
+		for _, ev := range buf.events() {
+			if ev.TS.After(from) && !ev.TS.After(to) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// adoptOrphans re-keys orphan events (run "") in the window (from, to] into run,
+// splitting each orphan flood buffer by timestamp (design D1/D3). It is the single
+// implementation shared by live open and replay (DRY) so attribution is identical
+// either way. Returns true when at least one event was adopted.
+//
+// A new run owns no buffers at open — adoption happens exactly at open precisely
+// so the destination floodKey is always absent — so the moved buffer is installed
+// directly under the new run's key.
+func (e *sessionEntry) adoptOrphans(run string, from, to time.Time) bool {
+	inWindow := func(ts time.Time) bool { return ts.After(from) && !ts.After(to) }
+
+	adoptedAny := false
+	for key, buf := range e.floods {
+		if key.run != "" {
+			continue
+		}
+		moved := buf.splitAdopt(run, inWindow)
+		if moved == nil {
+			continue
+		}
+		adoptedAny = true
+
+		e.floods[floodKey{run: run, probe: key.probe}] = moved
+		// An orphan buffer drained to empty leaves no per-run residue to query.
+		if buf.total == 0 {
+			delete(e.floods, key)
+		}
+	}
+	return adoptedAny
 }
 
 // Store is the in-memory source of truth for all investigations, backed by
@@ -370,6 +426,7 @@ func (s *Store) StaleProbes() []StaleProbe {
 
 // OpenRun starts a new run on a session and returns its ID. await_run opens a run
 // before the user reproduces the bug; every log event is stamped with it (D7).
+// Opening a new run adopts eligible pre-run orphan events into it (fix-prerun D1).
 func (s *Store) OpenRun(sessionID string) (Run, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -378,14 +435,7 @@ func (s *Store) OpenRun(sessionID string) (Run, error) {
 	if !ok {
 		return Run{}, fmt.Errorf("open run in %q: %w", sessionID, ErrSessionNotFound)
 	}
-
-	entry.nextRun++
-	run := Run{ID: "r" + strconv.Itoa(entry.nextRun), StartedAt: time.Now().UTC()}
-	entry.session.Runs = append(entry.session.Runs, run)
-	if err := s.writeState(entry.session); err != nil {
-		return Run{}, err
-	}
-	return run, nil
+	return s.openNewRunLocked(entry)
 }
 
 // OpenOrAttachRun returns the session's latest open run, or opens a new one if
@@ -403,17 +453,87 @@ func (s *Store) OpenOrAttachRun(sessionID string) (Run, error) {
 
 	for i := len(entry.session.Runs) - 1; i >= 0; i-- {
 		if entry.session.Runs[i].ClosedAt == nil {
+			// Re-attach to the open run: adoption happens only at open, never on
+			// re-attach (fix-prerun D1), so this path must not adopt.
 			return entry.session.Runs[i], nil
 		}
 	}
+	return s.openNewRunLocked(entry)
+}
 
+// openNewRunLocked opens a fresh run, persists an append-only adoption marker for
+// eligible pre-run orphans, then adopts them in memory (fix-prerun D1/D2). The
+// marker is written before the in-memory mutation so a marker-write failure can
+// abort the open with memory and disk still in agreement. It is the single
+// new-run path shared by OpenRun and OpenOrAttachRun so adoption can never be
+// bypassed by one entry point. Callers hold s.mu.
+func (s *Store) openNewRunLocked(entry *sessionEntry) (Run, error) {
+	now := time.Now().UTC()
 	entry.nextRun++
-	run := Run{ID: "r" + strconv.Itoa(entry.nextRun), StartedAt: time.Now().UTC()}
+	run := Run{ID: "r" + strconv.Itoa(entry.nextRun), StartedAt: now}
 	entry.session.Runs = append(entry.session.Runs, run)
 	if err := s.writeState(entry.session); err != nil {
+		// Roll back the in-memory run so a failed persist does not leave a
+		// phantom run that never reached disk.
+		entry.session.Runs = entry.session.Runs[:len(entry.session.Runs)-1]
+		entry.nextRun--
 		return Run{}, err
 	}
+
+	// Adopt orphans whose timestamps fall after the last run boundary and within
+	// the 15-minute cap (D1). The boundary is the lower of the two so anything
+	// after the prior verdict, but not ancient, joins this run.
+	//
+	// Persist the marker BEFORE mutating in-memory buffers so memory and disk
+	// cannot disagree: a marker-write failure aborts open with no adoption
+	// applied, rather than leaving adopted-in-memory state that a restart would
+	// revert to orphans (fix-prerun D2 atomicity).
+	from := adoptionLowerBound(entry.session, run.ID, now)
+	if entry.hasAdoptableOrphans(from, now) {
+		if err := s.appendAdoptMarker(entry, adoptMarker{Run: run.ID, From: from, To: now}); err != nil {
+			// Roll back the run too: the open did not complete durably, and the
+			// caller will retry. nextRun is intentionally left advanced so the retry
+			// gets a fresh ID for the in-memory lifetime — unlike the writeState path
+			// above, which rewinds it because that failure happens before any marker
+			// write. Reusing the ID is safe here regardless: the marker write failed,
+			// so nothing durable or cross-referenced ever named it, and a restart
+			// rebuilds nextRun from the persisted runs (maxRunNumber) anyway.
+			entry.session.Runs = entry.session.Runs[:len(entry.session.Runs)-1]
+			// Re-persist the rolled-back state. If this also fails, disk still holds
+			// the phantom run while memory dropped it, so a restart would resurrect
+			// an empty run; join the error so that window is disclosed, never silent.
+			if rbErr := s.writeState(entry.session); rbErr != nil {
+				return Run{}, errors.Join(err, fmt.Errorf("roll back run state after marker failure: %w", rbErr))
+			}
+			return Run{}, err
+		}
+		entry.adoptOrphans(run.ID, from, now)
+	}
 	return run, nil
+}
+
+// adoptionCap bounds how far back a newly opened run reaches for orphans, so an
+// hour-old straggler never pollutes a fresh attempt (design D1).
+const adoptionCap = 15 * time.Minute
+
+// adoptionLowerBound is the exclusive start of the adoption window for newRunID:
+// the latest *previous* run's close time, else the session start, raised to the
+// 15-minute cap (design D1). Only post-boundary orphans can belong to this run,
+// because any verdict was already given on what was visible before it.
+func adoptionLowerBound(sess *Session, newRunID string, now time.Time) time.Time {
+	boundary := sess.CreatedAt // session start when no prior run closed
+	for _, r := range sess.Runs {
+		if r.ID == newRunID || r.ClosedAt == nil {
+			continue
+		}
+		if r.ClosedAt.After(boundary) {
+			boundary = *r.ClosedAt
+		}
+	}
+	if cap := now.Add(-adoptionCap); cap.After(boundary) {
+		boundary = cap
+	}
+	return boundary
 }
 
 // CloseRun records the user's verdict on a run (D7).
@@ -500,8 +620,9 @@ func (s *Store) CloseLatestOpenRun(sessionID string, verdict RunVerdict) (Run, e
 // HTTP handler can drop drive-by POSTs silently (D4).
 func (s *Store) Ingest(sessionID, probeID string, body any, raw string) error {
 	// In-memory mutation under the global lock is fast and bounded (D8); the
-	// disk append is moved out of this critical section so it cannot serialize
-	// the await engine or other sessions on a file-write syscall.
+	// disk append syscall is performed after the global lock is released so it
+	// cannot serialize the await engine or other sessions. The per-session
+	// appendMu is taken before that release to fix on-disk ordering (see below).
 	s.mu.Lock()
 	entry, ok := s.sessions[sessionID]
 	if !ok {
@@ -519,12 +640,16 @@ func (s *Store) Ingest(sessionID, probeID string, body any, raw string) error {
 
 	ev := LogEvent{TS: time.Now().UTC(), Run: run, Probe: probeID, Body: body, Raw: raw}
 	entry.recordEvent(ev, s.floodN)
-	s.mu.Unlock()
 
-	// appendMu serializes writers to this session's logs.jsonl so concurrent
-	// ingests for the same session produce whole, ordered lines without holding
-	// the global lock across the syscall.
+	// Acquire appendMu BEFORE releasing s.mu so the order in which events (and
+	// adoption markers, which also take appendMu under s.mu) acquire the file lock
+	// matches the order in which they were recorded in memory under s.mu. This is
+	// what makes an adopted orphan's line strictly precede its run's marker on
+	// disk: a concurrent OpenRun, even after seeing this event in memory, cannot
+	// take appendMu for its marker until this line is durable. The syscall itself
+	// still runs after s.mu is released, so the global lock never spans a write.
 	entry.appendMu.Lock()
+	s.mu.Unlock()
 	defer entry.appendMu.Unlock()
 	if err := s.appendLog(sessionID, ev); err != nil {
 		return err
@@ -533,11 +658,14 @@ func (s *Store) Ingest(sessionID, probeID string, body any, raw string) error {
 }
 
 // ProbeSummary is the per-probe view of a run: the true total plus the retained
-// first/last-N events and whether the middle was dropped (D8).
+// first/last-N events and whether the middle was dropped (D8). Adopted reports how
+// many of Total were attributed by pre-run adoption rather than directly, so the
+// caller can always tell inferred attribution from direct (fix-prerun design D4).
 type ProbeSummary struct {
 	Probe     string     `json:"probe"`
 	Run       string     `json:"run"`
 	Total     int        `json:"total"`
+	Adopted   int        `json:"adopted"`
 	Truncated bool       `json:"truncated"`
 	Events    []LogEvent `json:"events"`
 }
@@ -585,6 +713,7 @@ func (s *Store) RunSummary(sessionID, runID string) ([]ProbeSummary, error) {
 			Probe:     key.probe,
 			Run:       key.run,
 			Total:     buf.total,
+			Adopted:   buf.adopted,
 			Truncated: buf.truncated(),
 			Events:    buf.events(),
 		})
@@ -602,10 +731,13 @@ type QueryFilter struct {
 
 // QueryResult is one matching (run, probe) bucket with its true total and the
 // retained events, capped by the filter limit (D8: truncation always disclosed).
+// Adopted carries pre-run adoption disclosure through query results, mirroring
+// ProbeSummary (fix-prerun design D4).
 type QueryResult struct {
 	Probe     string     `json:"probe"`
 	Run       string     `json:"run"`
 	Total     int        `json:"total"`
+	Adopted   int        `json:"adopted"`
 	Truncated bool       `json:"truncated"`
 	Events    []LogEvent `json:"events"`
 }
@@ -640,6 +772,7 @@ func (s *Store) QueryLogs(sessionID string, f QueryFilter) ([]QueryResult, error
 			Probe:     key.probe,
 			Run:       key.run,
 			Total:     buf.total,
+			Adopted:   buf.adopted,
 			Truncated: truncated,
 			Events:    events,
 		})

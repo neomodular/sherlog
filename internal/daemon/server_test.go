@@ -264,6 +264,79 @@ func TestAwaitReAttach(t *testing.T) {
 	}
 }
 
+// TestAwaitAdoptsPreRunEvents covers the fix-prerun integration path: probes fire
+// through the public ingest endpoint while no run is open (orphans), then
+// await_run opens a run and must return those events attributed to it, disclosed
+// as adopted (log-query: "Fast reproduction before await_run").
+func TestAwaitAdoptsPreRunEvents(t *testing.T) {
+	srv, st := newTestServer(t)
+	sess := mustSession(t, st)
+
+	// Fast scripted reproduction: events land before await_run opens a run.
+	for i := 0; i < 3; i++ {
+		do(srv, http.MethodPost, "/log/"+sess.ID+"/p1", `{"i":1}`)
+	}
+
+	// Nudge a single post-open event so the wait reaches quiet quickly; the three
+	// pre-run hits are adopted at open and present in the summary regardless.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		do(srv, http.MethodPost, "/log/"+sess.ID+"/p1", `{"i":2}`)
+	}()
+
+	res := awaitCall(t, srv, sess.ID, 5)
+	if len(res.Summary) != 1 || res.Summary[0].Probe != "p1" {
+		t.Fatalf("expected p1 summary, got %+v", res.Summary)
+	}
+	ps := res.Summary[0]
+	if ps.Total != 4 {
+		t.Errorf("Total = %d, want 4 (3 adopted + 1 direct)", ps.Total)
+	}
+	if ps.Adopted != 3 {
+		t.Errorf("Adopted = %d, want 3", ps.Adopted)
+	}
+}
+
+// TestAwaitFullyAdoptedReturnsOnDebounce covers fix-prerun Finding 3: when a run
+// is fully adopted at open (the reproduction finished before await_run opened the
+// run) and no further events arrive, await must return on the debounce window —
+// treating the adopted baseline as initial activity — rather than waiting the full
+// timeout. Asserts the call returns well under the timeout with reason "quiet".
+func TestAwaitFullyAdoptedReturnsOnDebounce(t *testing.T) {
+	srv, st := newTestServer(t)
+	sess := mustSession(t, st)
+
+	// Fast scripted reproduction: every event lands before await_run opens a run,
+	// and nothing fires afterwards (the "fully adopted" case).
+	for i := 0; i < 3; i++ {
+		do(srv, http.MethodPost, "/log/"+sess.ID+"/p1", `{"i":1}`)
+	}
+
+	start := time.Now()
+	res := awaitCall(t, srv, sess.ID, 5) // 5s timeout; must return far sooner
+	elapsed := time.Since(start)
+
+	if res.Reason != "quiet" {
+		t.Errorf("reason = %q, want \"quiet\"", res.Reason)
+	}
+	// Debounce is 150ms in the test server; allow generous slack but stay well
+	// under the 5s timeout so a regression to full-timeout waiting is caught.
+	if elapsed > 2*time.Second {
+		t.Errorf("fully-adopted await took %v, expected to return on debounce", elapsed)
+	}
+	ps, ok := func() (store.ProbeSummary, bool) {
+		for _, p := range res.Summary {
+			if p.Probe == "p1" {
+				return p, true
+			}
+		}
+		return store.ProbeSummary{}, false
+	}()
+	if !ok || ps.Total != 3 || ps.Adopted != 3 {
+		t.Errorf("want p1 total=3 adopted=3, got %+v", res.Summary)
+	}
+}
+
 // TestCloseRunVerdict covers verdict recording (spec: Run verdicts).
 func TestCloseRunVerdict(t *testing.T) {
 	srv, st := newTestServer(t)

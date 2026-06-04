@@ -174,6 +174,14 @@ sherlog probes --stale
 It lists every probe registered but never marked removed, across all sessions,
 with the session, file, and line — so you can clean up orphans by hand.
 
+### Downgrading the binary
+
+Don't run an older `sherlog` against state written by a newer one. Once a newer
+build has written an adoption marker into `~/.sherlog/<session>/logs.jsonl`, an
+older event-only build mis-reads that marker line as a phantom empty orphan
+instead of skipping it. Downgrade-after-upgrade is unsupported; stay on the
+newer build, or clear the session state before rolling back.
+
 ## Port 2218
 
 221B Baker Street — Sherlock Holmes's address. The fixed port is the brand and
