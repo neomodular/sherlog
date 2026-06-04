@@ -11,6 +11,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/neomodular/sherlog/internal/daemon"
+	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
 )
 
@@ -129,12 +130,12 @@ func TestEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(tools.Tools) != 10 {
+	if len(tools.Tools) != 11 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("tool count = %d, want 10: %v", len(tools.Tools), names)
+		t.Fatalf("tool count = %d, want 11: %v", len(tools.Tools), names)
 	}
 
 	// debug_start: session + probe contract.
@@ -231,6 +232,119 @@ func TestEndToEnd(t *testing.T) {
 	wantFrag := base + "/log/" + sid + "/"
 	if end.GreppableFragment != wantFrag {
 		t.Fatalf("debug_end fragment = %q, want %q", end.GreppableFragment, wantFrag)
+	}
+}
+
+// TestReportObservationRoundtrip drives the field-notes channel end to end: the
+// report_observation tool → daemon /api/notes → field-notes.jsonl, asserting the
+// note lands with its session and category and that the tool acknowledges filing
+// (field-notes D2/D3, task 2.3).
+func TestReportObservationRoundtrip(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	root := t.TempDir()
+	st, err := store.New(store.WithRoot(root))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	srv := &http.Server{Handler: daemon.NewServer(st, "test")}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		sctx, c := context.WithTimeout(context.Background(), time.Second)
+		defer c()
+		_ = srv.Shutdown(sctx)
+	})
+	base := "http://" + ln.Addr().String()
+
+	sess := connectMCP(t, ctx, base, port)
+
+	var out reportObservationOut
+	callTool(t, ctx, sess, "report_observation", map[string]any{
+		"note":       "await returned zero events though the user confirmed reproduction; suspect pre-run attribution",
+		"category":   "tool-bug",
+		"session_id": "a3f9",
+	}, &out)
+	if !out.Filed {
+		t.Fatal("report_observation: filed = false, want true")
+	}
+
+	ns, err := notes.New(notes.WithRoot(root))
+	if err != nil {
+		t.Fatalf("notes.New: %v", err)
+	}
+	list, err := ns.List("")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("note count = %d, want 1", len(list))
+	}
+	if list[0].Session != "a3f9" || list[0].Category != notes.CategoryToolBug || list[0].Version != "test" {
+		t.Errorf("note = %+v", list[0])
+	}
+}
+
+// TestReportObservationFireAndForget covers design D3: filing never blocks. With
+// no daemon reachable, the tool still returns a minimal acknowledgment (filed:
+// false) rather than a tool error, so an investigation is never interrupted.
+func TestReportObservationFireAndForget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Point the client at a closed loopback port: ensureDaemon will try (and fail)
+	// to reach/spawn a daemon, and the tool must swallow that into filed:false.
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	_ = ln.Close() // free the port so nothing answers
+	base := "http://127.0.0.1:" + port
+
+	c := &daemonClient{
+		base:      base,
+		port:      port,
+		http:      &http.Client{Timeout: time.Second},
+		awaitHTTP: &http.Client{},
+	}
+	server := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "sherlog", Version: "test"}, nil)
+	registerTools(server, c)
+	stt, ct := mcpsdk.NewInMemoryTransports()
+	if _, err := server.Connect(ctx, stt, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "test"}, nil)
+	sess, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	// The auto-spawn path would normally try to launch `sherlog daemon`; in the
+	// test binary that exe is the test runner, so spawning is harmless and the
+	// follow-up health wait fails fast against the dead port. Either way the tool
+	// must NOT surface an error.
+	res, err := sess.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "report_observation",
+		Arguments: map[string]any{
+			"note":     "daemon unreachable, must not block",
+			"category": "anomaly",
+		},
+	})
+	if err != nil {
+		t.Fatalf("report_observation: protocol error: %v", err)
+	}
+	if res.IsError {
+		t.Fatal("report_observation surfaced a tool error; filing must be fire-and-forget (D3)")
+	}
+	var out reportObservationOut
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+	if out.Filed {
+		t.Error("filed = true with no daemon reachable; want false")
 	}
 }
 

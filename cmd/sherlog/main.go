@@ -8,12 +8,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"text/tabwriter"
+	"time"
 
 	"github.com/neomodular/sherlog/internal/daemon"
 	"github.com/neomodular/sherlog/internal/mcp"
+	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
 )
 
@@ -44,6 +47,8 @@ func run(args []string) error {
 		return mcp.Run(ctx, version)
 	case "probes":
 		return cmdProbes(args[1:])
+	case "notes":
+		return cmdNotes(args[1:])
 	case "--version", "-version", "version":
 		fmt.Println("sherlog", version)
 		return nil
@@ -91,13 +96,62 @@ func cmdProbes(args []string) error {
 	return tw.Flush()
 }
 
+// cmdNotes is the `sherlog notes` subcommand: the maintainer's inbox for agent
+// field notes about sherlog itself (field-notes spec: Maintainer CLI). It prints
+// notes chronologically (oldest to newest) with --category to filter, reading the
+// JSONL directly so it works with no daemon running. An absent notes file yields
+// empty output, never an error.
+func cmdNotes(args []string) error {
+	fs := flag.NewFlagSet("notes", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	category := fs.String("category", "", "filter to one category (tool-bug, friction, anomaly, other)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ns, err := notes.New()
+	if err != nil {
+		return fmt.Errorf("notes: open store: %w", err)
+	}
+	return renderNotes(os.Stdout, ns, notes.Category(*category))
+}
+
+// renderNotes prints the inbox chronologically (oldest first) to w, optionally
+// filtered by category. Split out from cmdNotes so the rendering is testable
+// without touching the home directory (field-notes Maintainer CLI).
+func renderNotes(w io.Writer, ns *notes.Store, category notes.Category) error {
+	list, err := ns.List(category)
+	if err != nil {
+		return fmt.Errorf("notes: read: %w", err)
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(w, "no field notes")
+		return nil
+	}
+
+	// Tab-aligned columns so the inbox is easy to skim (field-notes D4). Notes can
+	// contain newlines; print the note last so column alignment survives.
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "TIMESTAMP\tCATEGORY\tSESSION\tNOTE")
+	for _, n := range list {
+		session := n.Session
+		if session == "" {
+			session = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", n.TS.Format(time.RFC3339), n.Category, session, n.Note)
+	}
+	return tw.Flush()
+}
+
 func usage(w *os.File) {
 	fmt.Fprint(w, `sherlog — hypothesis-driven debugging for Claude Code
 
 usage:
-  sherlog daemon          run the resident localhost log/state daemon
-  sherlog mcp             run the MCP stdio server (launched by the plugin)
-  sherlog probes --stale  list probes registered but not yet removed
-  sherlog --version       print the version
+  sherlog daemon            run the resident localhost log/state daemon
+  sherlog mcp               run the MCP stdio server (launched by the plugin)
+  sherlog probes --stale    list probes registered but not yet removed
+  sherlog notes [--category <c>]
+                            read agent field notes about sherlog itself
+  sherlog --version         print the version
 `)
 }

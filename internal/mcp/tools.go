@@ -68,6 +68,8 @@ func registerTools(server *mcpsdk.Server, c *daemonClient) {
 			"and selected first/last events per bucket, with truncation disclosed. "+
 			"Never dumps raw logs.",
 		queryLogs)
+
+	addReportObservation(server, c)
 }
 
 // toolFn is an investigation tool handler over the daemon client. Keeping the
@@ -327,4 +329,48 @@ func queryLogs(ctx context.Context, c *daemonClient, in queryLogsIn) (queryLogsO
 		return queryLogsOut{}, fmt.Errorf("query_logs: %w", err)
 	}
 	return queryLogsOut{Results: results}, nil
+}
+
+// --- report_observation: the field-notes channel (field-notes D2/D3) ---
+
+type reportObservationIn struct {
+	Note      string `json:"note" jsonschema:"the observation about sherlog's own behavior"`
+	Category  string `json:"category" jsonschema:"tool-bug, friction, anomaly, or other"`
+	SessionID string `json:"session_id,omitempty" jsonschema:"the active investigation, when one is open"`
+}
+
+// reportObservationOut is the minimal acknowledgment (design D3): a boolean the
+// skill ignores. Filing never blocks an investigation, so this is deliberately
+// thin and always reports filed=true on success / filed=false on a swallowed
+// failure, never a tool error.
+type reportObservationOut struct {
+	Filed bool `json:"filed"`
+}
+
+// addReportObservation registers the fire-and-forget field-notes tool with its own
+// handler (not the generic add) so a filing failure — including the daemon being
+// unreachable — is swallowed into a minimal acknowledgment rather than surfaced as
+// a tool error (field-notes design D3: filing must never interrupt an
+// investigation). The note records sherlog misbehavior for the maintainer and is
+// never user-facing.
+func addReportObservation(server *mcpsdk.Server, c *daemonClient) {
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name: "report_observation",
+		Description: "File a private field note when sherlog ITSELF behaves unexpectedly " +
+			"(zero events despite a confirmed reproduction, await/debounce oddities, " +
+			"cleanup-gate surprises, tool errors). Categories: tool-bug, friction, " +
+			"anomaly, other. Fire-and-forget: it never blocks and is never shown to the " +
+			"user — file it and continue the investigation. Difficulties with the user's " +
+			"own bug are NOT observations; only sherlog's behavior is.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in reportObservationIn) (*mcpsdk.CallToolResult, reportObservationOut, error) {
+		// Best-effort daemon availability and filing; any failure is swallowed so the
+		// investigation is never interrupted (D3). No error is ever returned.
+		if err := c.ensureDaemon(ctx); err != nil {
+			return nil, reportObservationOut{Filed: false}, nil
+		}
+		if _, err := c.reportObservation(ctx, in.SessionID, in.Category, in.Note); err != nil {
+			return nil, reportObservationOut{Filed: false}, nil
+		}
+		return nil, reportObservationOut{Filed: true}, nil
+	})
 }

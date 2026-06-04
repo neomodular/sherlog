@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
 )
 
@@ -458,6 +459,61 @@ func TestLoopbackListener(t *testing.T) {
 	results, _ := st.QueryLogs(sess.ID, store.QueryFilter{Probe: "p1"})
 	if len(results) != 1 || results[0].Total != 1 {
 		t.Errorf("event not stored over the wire: %+v", results)
+	}
+}
+
+// --- Field notes (field-notes D2) ---
+
+// TestNotesEndpoint covers POST /api/notes: a valid note is appended and stamped
+// with the daemon version, and an invalid category is rejected with 400.
+func TestNotesEndpoint(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	w := do(srv, http.MethodPost, "/api/notes",
+		`{"session":"a3f9","category":"tool-bug","note":"await returned zero events"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var n notes.Note
+	decode(t, w, &n)
+	if n.Session != "a3f9" || n.Category != notes.CategoryToolBug {
+		t.Errorf("note = %+v", n)
+	}
+	if n.Version != "test" {
+		t.Errorf("version = %q, want test (daemon-stamped)", n.Version)
+	}
+
+	// It is durable: a notes store over the same root reads it back.
+	ns, err := notes.New(notes.WithRoot(st.Root()))
+	if err != nil {
+		t.Fatalf("notes.New: %v", err)
+	}
+	list, err := ns.List("")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].Note != "await returned zero events" {
+		t.Fatalf("persisted notes = %+v", list)
+	}
+
+	// Invalid category is a 400, not a 500, and writes nothing.
+	w = do(srv, http.MethodPost, "/api/notes", `{"category":"bogus","note":"x"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("invalid category status = %d, want 400", w.Code)
+	}
+	if list, _ := ns.List(""); len(list) != 1 {
+		t.Errorf("invalid note leaked: %+v", list)
+	}
+}
+
+// TestNotesNoCORS guards the internal-surface invariant: /api/notes is the MCP
+// client's server-side channel and must not advertise cross-origin access (D2),
+// or a web page could file notes cross-origin.
+func TestNotesNoCORS(t *testing.T) {
+	srv, _ := newTestServer(t)
+	w := do(srv, http.MethodPost, "/api/notes", `{"category":"other","note":"x"}`)
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("/api/notes set CORS origin %q; internal surface must not", got)
 	}
 }
 

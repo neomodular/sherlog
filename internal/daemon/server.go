@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
 )
 
@@ -27,13 +28,17 @@ const maxAPIBody = 1 << 20 // 1 MiB
 // concurrency-safe source of truth, so the Server is safe for concurrent use.
 type Server struct {
 	store   *store.Store
+	notes   *notes.Store
 	awaiter *awaitEngine
 	version string
 	started time.Time
 	mux     *http.ServeMux
 }
 
-// NewServer builds the Server and its route table over the given store.
+// NewServer builds the Server and its route table over the given store. The
+// field-notes store shares the investigation store's root so all local sherlog
+// data lives in one directory (field-notes design D1); a failure to construct it
+// is non-fatal — notes are best-effort telemetry, never an investigation gate.
 func NewServer(s *store.Store, version string) *Server {
 	srv := &Server{
 		store:   s,
@@ -41,6 +46,9 @@ func NewServer(s *store.Store, version string) *Server {
 		version: version,
 		started: time.Now(),
 		mux:     http.NewServeMux(),
+	}
+	if n, err := notes.New(notes.WithRoot(s.Root())); err == nil {
+		srv.notes = n
 	}
 	srv.routes()
 	return srv
@@ -64,6 +72,7 @@ func (s *Server) routes() {
 	// visibly distinct from the public probe/health endpoints.
 	s.mux.HandleFunc("/api/sessions", s.handleSessions)     // POST create, GET resume-latest
 	s.mux.HandleFunc("/api/sessions/", s.handleSessionByID) // GET state, DELETE close, plus sub-resources
+	s.mux.HandleFunc("/api/notes", s.handleNotes)           // POST file a field note (field-notes D2)
 }
 
 // --- Public: log ingest (D3, spec: Localhost HTTP log ingestion) ---
@@ -416,6 +425,45 @@ func (s *Server) queryLogs(w http.ResponseWriter, r *http.Request, id string) {
 		results = []store.QueryResult{{Probe: f.Probe, Run: f.Run, Total: 0, Truncated: false, Events: []store.LogEvent{}}}
 	}
 	writeJSON(w, http.StatusOK, results)
+}
+
+// --- Internal API: field notes (field-notes D2) ---
+
+// handleNotes appends one agent observation about sherlog itself to the global
+// field-notes file. The internal /api/ surface carries no CORS (server-side MCP
+// client only). The endpoint stamps the note with the daemon's version so the
+// note records the build that filed it. Filing failures are returned as errors so
+// the MCP tool can swallow them at its boundary (fire-and-forget lives in the
+// tool/skill, design D3), but a note never blocks any investigation endpoint.
+func (s *Server) handleNotes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.notes == nil {
+		// Notes store unavailable (root could not resolve): degrade silently rather
+		// than 500, since field notes are best-effort telemetry, never required.
+		writeError(w, http.StatusServiceUnavailable, errors.New("field notes unavailable"))
+		return
+	}
+	var req struct {
+		Session  string `json:"session"`
+		Category string `json:"category"`
+		Note     string `json:"note"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	n, err := s.notes.Append(req.Session, s.version, notes.Category(req.Category), req.Note)
+	if errors.Is(err, notes.ErrInvalidCategory) {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, n)
 }
 
 // --- shared helpers ---

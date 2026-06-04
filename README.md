@@ -130,6 +130,13 @@ sherlog is built for local debugging only, with defense in depth:
   Without it, drive-by localhost POSTs go nowhere.
 - **Unknown sessions are dropped.** Requests whose session segment matches no open
   session are silently discarded — no state is created from unsolicited traffic.
+- **Field notes stay local.** When sherlog itself misbehaves, the `/debug` skill
+  may file a private *field note* (`report_observation`) for the maintainer,
+  appended to `~/.sherlog/field-notes.jsonl`. These notes can quote investigation
+  context — including values seen by probes — so, like everything else sherlog
+  stores, they never leave your machine: there is no upload or telemetry anywhere.
+  Read them with `sherlog notes` (`--category` to filter); delete the file to
+  discard them.
 
 To override the port (e.g. 2218 is taken), set `SHERLOG_PORT`. Probe URLs are
 always generated from the template the daemon returns, so the override

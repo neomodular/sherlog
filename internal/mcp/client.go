@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/neomodular/sherlog/internal/daemon"
+	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
 )
 
@@ -285,6 +286,17 @@ func (c *daemonClient) queryLogs(ctx context.Context, id string, f store.QueryFi
 	}
 	var out []store.QueryResult
 	err := c.call(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
+
+// reportObservation files one field note against the daemon (field-notes D2).
+// The daemon stamps the version; the session is the active investigation when one
+// is open, else empty.
+func (c *daemonClient) reportObservation(ctx context.Context, session, category, note string) (notes.Note, error) {
+	var out notes.Note
+	err := c.call(ctx, http.MethodPost, "/api/notes", map[string]any{
+		"session": session, "category": category, "note": note,
+	}, &out)
 	return out, err
 }
 
