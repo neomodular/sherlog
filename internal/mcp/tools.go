@@ -105,6 +105,7 @@ type debugStartIn struct {
 type debugStartOut struct {
 	SessionID     string         `json:"session_id"`
 	ProbeContract probeContract  `json:"probe_contract"`
+	Preferences   preferences    `json:"preferences"`             // skill presentation (design D4)
 	WarnSameCWD   *store.Session `json:"warn_same_cwd,omitempty"` // a concurrent open session here
 }
 
@@ -117,6 +118,7 @@ func debugStart(ctx context.Context, c *daemonClient, in debugStartIn) (debugSta
 	return debugStartOut{
 		SessionID:     res.Session.ID,
 		ProbeContract: buildProbeContract(c.probeURLTemplate(res.Session.ID)),
+		Preferences:   res.Preferences,
 		WarnSameCWD:   res.ExistingSameCWD,
 	}, nil
 }

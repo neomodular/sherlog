@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/neomodular/sherlog/internal/config"
 	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
 )
@@ -30,19 +31,22 @@ type Server struct {
 	store   *store.Store
 	notes   *notes.Store
 	awaiter *awaitEngine
+	cfg     config.Effective // effective config, surfaced on /health and in preferences
 	version string
 	started time.Time
 	mux     *http.ServeMux
 }
 
-// NewServer builds the Server and its route table over the given store. The
-// field-notes store shares the investigation store's root so all local sherlog
+// NewServer builds the Server and its route table over the given store, wiring the
+// await engine to the effective config's debounce and max-timeout (add-config).
+// The field-notes store shares the investigation store's root so all local sherlog
 // data lives in one directory (field-notes design D1); a failure to construct it
 // is non-fatal — notes are best-effort telemetry, never an investigation gate.
-func NewServer(s *store.Store, version string) *Server {
+func NewServer(s *store.Store, version string, cfg config.Effective) *Server {
 	srv := &Server{
 		store:   s,
-		awaiter: newAwaitEngine(s),
+		awaiter: newAwaitEngine(s, time.Duration(cfg.AwaitDebounceSeconds)*time.Second, time.Duration(cfg.AwaitMaxTimeoutSeconds)*time.Second),
+		cfg:     cfg,
 		version: version,
 		started: time.Now(),
 		mux:     http.NewServeMux(),
@@ -161,9 +165,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	// The effective config (values + sources) is surfaced here so users and the
+	// skill can diagnose "why is it behaving like that" (configuration spec:
+	// Effective config is observable).
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version": s.version,
 		"uptime":  time.Since(s.started).Round(time.Second).String(),
+		"config":  s.cfg,
 	})
 }
 
@@ -193,9 +201,15 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// Skill preferences ride the create-session response so the plugin never reads
+	// the filesystem (design D4): debug_start forwards this block to the skill.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session":           created,
 		"existing_same_cwd": existing, // non-nil warns the caller of a concurrent session
+		"preferences": map[string]string{
+			"verbosity": s.cfg.Verbosity,
+			"color":     s.cfg.Color,
+		},
 	})
 }
 
@@ -365,9 +379,10 @@ func (s *Server) awaitRun(w http.ResponseWriter, r *http.Request, id string) {
 		timeout = time.Duration(req.TimeoutS) * time.Second
 	}
 	// Clamp client-supplied timeouts so a misconfigured caller cannot hold a
-	// daemon goroutine open far longer than any real reproduction needs.
-	if timeout > maxAwaitTimeout {
-		timeout = maxAwaitTimeout
+	// daemon goroutine open far longer than any real reproduction needs. The clamp
+	// is the configured max-timeout (add-config; default 600s).
+	if timeout > s.awaiter.maxTimeout {
+		timeout = s.awaiter.maxTimeout
 	}
 	res, err := s.awaiter.await(r.Context(), id, timeout)
 	if s.handleStoreErr(w, err) {

@@ -787,6 +787,57 @@ func (s *Store) QueryLogs(sessionID string, f QueryFilter) ([]QueryResult, error
 	return out, nil
 }
 
+// --- Retention pruning (configuration spec: Retention pruning) ---
+
+// PruneClosedBefore deletes every session closed strictly before cutoff from both
+// memory and disk, returning the IDs removed (sorted) so the caller can log them.
+// Open sessions are never pruned regardless of age — this is the only deletion path
+// in sherlog and it must never touch a live investigation. A session whose on-disk
+// directory cannot be removed is left in memory and excluded from the result so a
+// failed delete is not falsely reported as pruned.
+//
+// The whole prune — eligibility check, os.RemoveAll, and map delete — runs under a
+// single s.mu critical section. This serializes prune against the writeState-based
+// reopen paths (CreateSession/OpenRun/OpenOrAttachRun), all of which mutate the map
+// and write state on-lock: while s.mu is held none of them can run, so none can
+// reopen a session that is about to be forgotten from memory nor re-create its dir
+// behind os.RemoveAll. It does NOT serialize against Ingest's disk append: Ingest
+// re-MkdirAlls the dir inside appendLog, which runs off s.mu (under appendMu only)
+// after the global lock is released. prune never takes appendMu, so a drive-by POST
+// ingesting into an already-closed session can race os.RemoveAll and resurrect a
+// zombie on-disk directory. This residual race is accepted: it requires an ingest to
+// a session that was closed strictly before the cutoff (> retention_days ago), the
+// worst case is an orphan directory for a non-live session (open sessions stay
+// immune, the in-memory entry is already gone, and replay would re-adopt nothing of
+// value), and closing it would mean holding every session's appendMu across the
+// syscall — a far heavier coupling than the leak it prevents. Holding s.mu across
+// os.RemoveAll departs from ingest's filesystem-off-the-lock discipline (see
+// appendMu) but is bounded: prune touches only already-closed sessions, runs on a
+// slow timer rather than the hot ingest path, and removing already-closed dirs
+// cannot contend with the await engine's polling of open runs.
+func (s *Store) PruneClosedBefore(cutoff time.Time) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var pruned []string
+	for id, entry := range s.sessions {
+		closed := entry.session.ClosedAt
+		if closed == nil || !closed.Before(cutoff) {
+			continue // open, or closed recently enough to keep
+		}
+		if err := os.RemoveAll(s.sessionDir(id)); err != nil {
+			// Leave it in memory; a transient FS error must not drop the session
+			// silently nor be reported as a successful prune.
+			sort.Strings(pruned)
+			return pruned, fmt.Errorf("prune session %q: %w", id, err)
+		}
+		delete(s.sessions, id)
+		pruned = append(pruned, id)
+	}
+	sort.Strings(pruned)
+	return pruned, nil
+}
+
 // --- internal helpers (callers hold s.mu) ---
 
 func (s *Store) findOpenByCWDLocked(cwd string) *sessionEntry {

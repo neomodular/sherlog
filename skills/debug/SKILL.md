@@ -41,6 +41,8 @@ gather context → debug_start → ≥3 suspects (set_hypotheses)
    - `session_id` — thread it through every later call.
    - `probe_contract` — the `url_template` (`http://127.0.0.1:2218/log/<session>/<probe>`),
      a one-line `note`, and `one_liners` per language (js, python, go, ruby, curl).
+   - `preferences` — `{verbosity, color}` for presentation (see "Presentation
+     preferences" below). Apply them to every line you print this session.
    - `warn_same_cwd` — if non-null, **another open session already exists for this
      directory.** Warn the user (do not block): "There's already an open sherlog
      case (#<id>) for this folder — continuing as a separate investigation. Run
@@ -280,14 +282,52 @@ When invoked as resume (or any time you've lost the thread):
 
 ---
 
+## Presentation preferences
+
+`debug_start` returns `preferences {verbosity, color}` (resolved by the daemon from
+config; missing config = the defaults below). They control **presentation only —
+never rigor.** Every loop obligation in the Discipline checklist holds identically
+in every mode: ≥3 suspects, ≥1 discriminating probe each, the blocking
+`await_run`, evidence-noted kills/confirms, the fixed-check run, and the grep
+cleanup gate. Verbosity changes how you *say* things, not what you *do*.
+
+**`verbosity`:**
+
+- **`detective`** (default) — the full presentation below: the mascot sprite, the
+  branded status line, and the detective vocabulary ("the game is afoot",
+  "elementary.", "case closed").
+- **`minimal`** — drop all of it. **No sprite art, no detective phrases**, no
+  flourish. Print plain status lines instead:
+  - In place of the banner: a one-line state, e.g.
+    `sherlog · case #<id> · N suspects · M probes · port <port>`.
+  - In place of "the game is afoot": `Reproduce the bug now; waiting…`
+  - In place of "elementary.": `Root cause confirmed: <hN> (<evidence>).`
+  - In place of "case closed": `Done — all N probes removed, grep clean.`
+  - **Keep every functional line** the user needs: the same status facts, the Case
+    Board link if one is shown, the cleanup result and grep outcome, verdict
+    prompts, and the zero-event guidance. Minimal removes theater, not information.
+
+**`color`:**
+
+- **`auto`** (default) — colorize the sprite when the terminal supports ANSI
+  truecolor; print plain otherwise (the existing behavior).
+- **`always`** — always emit the ANSI color sequences.
+- **`never`** — **strip all ANSI escape sequences**; print plain text only.
+  Applies in `detective` mode too (plain sprite, no color codes).
+
 ## Branded presentation
+
+*(Detective verbosity. In `minimal` mode, skip the sprite and vocabulary entirely
+and use the plain status lines above — but keep the same facts and obligations.)*
 
 Print this banner at session start and at major transitions. **The sprite art
 never changes between states — only the status line text does.**
 
-When the terminal supports ANSI color, render the **cap navy** and the **body
-coral** (leave the eye/background glyphs untouched). The sprite, character for
-character:
+Honor the `color` preference (above): render colorized only when `color` is
+`auto` (and the terminal supports ANSI) or `always`; with `color: never` print the
+plain sprite with no escape codes. When colorizing, render the **cap navy** and the
+**body coral** (leave the eye/background glyphs untouched). The sprite, character
+for character:
 
 ```
      ▄▄▄▄
@@ -343,3 +383,4 @@ else):
 - [ ] `debug_end` → remove all probes → grep fragment = 0 matches → "case closed".
 - [ ] State read from the daemon board, never from conversation memory.
 - [ ] sherlog itself misbehaved (not the user's bug) → `report_observation` silently, then continue.
+- [ ] `preferences` applied: `minimal` drops theming only — every obligation above still holds; `color: never` strips ANSI.

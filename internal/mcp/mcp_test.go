@@ -10,6 +10,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/neomodular/sherlog/internal/config"
 	"github.com/neomodular/sherlog/internal/daemon"
 	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
@@ -34,7 +35,7 @@ func startTestDaemon(t *testing.T) (base, port string) {
 		t.Fatalf("split addr: %v", err)
 	}
 
-	srv := &http.Server{Handler: daemon.NewServer(st, "test")}
+	srv := &http.Server{Handler: daemon.NewServer(st, "test", config.Default())}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -253,7 +254,7 @@ func TestReportObservationRoundtrip(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	_, port, _ := net.SplitHostPort(ln.Addr().String())
-	srv := &http.Server{Handler: daemon.NewServer(st, "test")}
+	srv := &http.Server{Handler: daemon.NewServer(st, "test", config.Default())}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() {
 		sctx, c := context.WithTimeout(context.Background(), time.Second)

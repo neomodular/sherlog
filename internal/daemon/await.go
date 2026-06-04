@@ -8,30 +8,37 @@ import (
 	"github.com/neomodular/sherlog/internal/store"
 )
 
-// Default await tuning (D8). debounceQuiet is how long log flow must stay quiet
-// after first activity before await returns early; pollInterval is how often the
-// engine samples event counts to detect activity and quiet. defaultAwaitTimeout
-// is the wait length when the client sends none; maxAwaitTimeout bounds a
-// client-supplied timeout so a single await cannot pin a goroutine indefinitely.
+// pollInterval is how often the engine samples event counts to detect activity
+// and quiet; defaultAwaitTimeout is the wait length when the client sends none.
+// The debounce-quiet window and the max-timeout clamp are now per-engine tuning
+// resolved from config (add-config), with defaults 2s / 600s matching the MVP.
 const (
-	defaultDebounceQuiet = 2 * time.Second
-	defaultPollInterval  = 100 * time.Millisecond
-	defaultAwaitTimeout  = 120 * time.Second // D8 default
-	maxAwaitTimeout      = 600 * time.Second
+	defaultPollInterval = 100 * time.Millisecond
+	defaultAwaitTimeout = 120 * time.Second // D8 default
 )
 
 // awaitEngine implements the open-or-attach run + blocking wait of D8. It is
 // stateless beyond its tuning knobs and the store it observes: open-or-attach is
 // a single atomic store operation (store.OpenOrAttachRun), so concurrent await
 // calls on the same session converge on the same run with no locking here.
+//
+// debounce is how long log flow must stay quiet after first activity before await
+// returns early; maxTimeout bounds a client-supplied timeout so a single await
+// cannot pin a goroutine indefinitely. Both come from the effective config.
 type awaitEngine struct {
-	store    *store.Store
-	debounce time.Duration
-	poll     time.Duration
+	store      *store.Store
+	debounce   time.Duration
+	poll       time.Duration
+	maxTimeout time.Duration
 }
 
-func newAwaitEngine(s *store.Store) *awaitEngine {
-	return &awaitEngine{store: s, debounce: defaultDebounceQuiet, poll: defaultPollInterval}
+// newAwaitEngine builds the engine with the configured debounce and max-timeout
+// (add-config). Both come straight from the effective config, which config.Load
+// already range-validates (debounce 0–30s, max-timeout 30–3600s) before the daemon
+// is built. No clamping here: a debounce of 0 is legitimate and must reach the
+// engine intact so /health and the loop agree on the effective value.
+func newAwaitEngine(s *store.Store, debounce, maxTimeout time.Duration) *awaitEngine {
+	return &awaitEngine{store: s, debounce: debounce, poll: defaultPollInterval, maxTimeout: maxTimeout}
 }
 
 // awaitResult is what an await call resolves to: the run it attached to, the

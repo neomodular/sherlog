@@ -9,40 +9,51 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"syscall"
 	"time"
 
+	"github.com/neomodular/sherlog/internal/config"
 	"github.com/neomodular/sherlog/internal/store"
 )
 
 // DefaultPort is Baker Street 221B (D4): the fixed brand port that makes probe
-// lines instantly recognizable in diffs.
-const DefaultPort = "2218"
+// lines instantly recognizable in diffs. It mirrors config.DefaultPort so other
+// packages (the MCP client) can reference the brand port without importing config.
+const DefaultPort = config.DefaultPort
 
-// Run starts the daemon and blocks until the HTTP server exits. The listener is
-// bound to 127.0.0.1 only (D4); SHERLOG_PORT overrides the port. A bind failure
-// — most importantly a foreign process already holding the port — is reported
-// with a clear, actionable message rather than a raw syscall error.
+// Run starts the daemon and blocks until the HTTP server exits. Configuration is
+// resolved once (env > file > default, add-config) and drives the port, the store
+// flood window, the await tuning, and retention pruning. The listener is bound to
+// 127.0.0.1 only (D4); SHERLOG_PORT overrides the port. A bind failure — most
+// importantly a foreign process already holding the port — is reported with a
+// clear, actionable message rather than a raw syscall error.
 func Run(version string) error {
-	st, err := store.New()
+	root, err := config.DefaultRoot()
+	if err != nil {
+		return fmt.Errorf("daemon: resolve config root: %w", err)
+	}
+	cfg, err := config.Load(root)
+	if err != nil {
+		return fmt.Errorf("daemon: load config: %w", err)
+	}
+
+	st, err := store.New(store.WithFloodN(cfg.FloodKeep))
 	if err != nil {
 		return fmt.Errorf("daemon: init store: %w", err)
 	}
 
-	port := os.Getenv("SHERLOG_PORT")
-	if port == "" {
-		port = DefaultPort
-	}
-	addr := net.JoinHostPort("127.0.0.1", port)
+	// Retention pruning runs at startup and on a daily ticker (configuration spec:
+	// Retention pruning). retention_days 0 (the default) keeps everything forever.
+	startRetention(st, cfg.RetentionDays)
 
+	addr := net.JoinHostPort("127.0.0.1", cfg.Port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return bindError(addr, port, err)
+		return bindError(addr, cfg.Port, err)
 	}
 
 	srv := &http.Server{
-		Handler: NewServer(st, version),
+		Handler: NewServer(st, version, cfg),
 		// Generous header timeout guards against slowloris on a localhost-only
 		// service; no overall write/read timeout because await_run long-polls.
 		ReadHeaderTimeout: 5 * time.Second,

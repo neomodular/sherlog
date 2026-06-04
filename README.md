@@ -142,6 +142,46 @@ To override the port (e.g. 2218 is taken), set `SHERLOG_PORT`. Probe URLs are
 always generated from the template the daemon returns, so the override
 propagates into every emitted probe line automatically.
 
+## Configuration
+
+Every tuning value has a built-in default; an absent config file means today's
+behavior, so configuration is entirely optional. To change a value, edit
+`~/.sherlog/config.json` or use the CLI:
+
+```sh
+sherlog config list                 # every key, its effective value, and source
+sherlog config get flood_keep       # one value
+sherlog config set flood_keep 50    # validate and persist one value
+```
+
+**Precedence** (highest wins): environment variable → config file → built-in
+default. Only `SHERLOG_PORT` exists as an env override, and it stays authoritative
+over a `port` in the file. `config list` shows each value's source
+(`default` / `file` / `env`) so you can see *why* a setting is what it is; the same
+effective config is on `GET /health`.
+
+| Key | Default | Range / values | Effect |
+|---|---|---|---|
+| `port` | `2218` | 1–65535 | Daemon TCP port (loopback only). `SHERLOG_PORT` overrides it. |
+| `flood_keep` | `20` | 1–1000 | First/last-N events retained per probe per run; the middle is dropped with the exact total still disclosed. Raise it for chatty apps. |
+| `await_debounce_seconds` | `2` | 0–30 | How long probe activity must stay quiet before `await_run` returns early. |
+| `await_max_timeout_seconds` | `600` | 30–3600 | Upper clamp on an `await_run` timeout. Also bounds the default 120s wait used when no client timeout is given, so setting it below 120 shortens default awaits too. |
+| `retention_days` | `0` | ≥ 0 | Prune closed sessions older than N days. `0` keeps everything forever. |
+| `verbosity` | `detective` | `detective` \| `minimal` | Skill presentation: `minimal` drops the mascot/vocabulary, keeps the discipline. |
+| `color` | `auto` | `auto` \| `always` \| `never` | ANSI color in the skill banner. `never` strips all escapes. |
+
+Keys are strict: an unknown key (e.g. a typo like `flod_keep`) fails loading with
+a clear error rather than being silently ignored.
+
+Changes apply on the **next daemon start** — there is no hot reload. Restart the
+daemon (or stop it and let the next tool call re-spawn it) to pick up a change.
+
+> **Retention deletes data.** With `retention_days > 0`, closed sessions older
+> than the window are deleted from `~/.sherlog` (disk and memory) at startup and
+> every 24 hours; each prune logs the session IDs it removed. Open sessions are
+> never pruned. If you value the archive of past cases, leave `retention_days` at
+> its default of `0`.
+
 ## Using /debug
 
 A typical investigation:

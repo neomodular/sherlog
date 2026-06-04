@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/neomodular/sherlog/internal/config"
 	"github.com/neomodular/sherlog/internal/daemon"
 	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
@@ -39,12 +40,18 @@ type healthInfo struct {
 	Uptime  string `json:"uptime"`
 }
 
-// newDaemonClient resolves the daemon address from SHERLOG_PORT (default 2218,
-// D4) and builds the HTTP clients. It does not contact the daemon.
+// newDaemonClient resolves the daemon address through the same config resolution
+// the daemon uses (env > file > default), so the MCP process and the daemon never
+// disagree on the port even when it is set via config.json rather than
+// SHERLOG_PORT (design D2/D4). A config load failure falls back to the brand port
+// rather than blocking the MCP server from starting. It does not contact the
+// daemon.
 func newDaemonClient() *daemonClient {
-	port := os.Getenv("SHERLOG_PORT")
-	if port == "" {
-		port = daemon.DefaultPort
+	port := daemon.DefaultPort
+	if root, err := config.DefaultRoot(); err == nil {
+		if cfg, err := config.Load(root); err == nil {
+			port = cfg.Port
+		}
 	}
 	return &daemonClient{
 		base:      "http://" + net.JoinHostPort("127.0.0.1", port),
@@ -180,10 +187,19 @@ func (c *daemonClient) health(ctx context.Context) (healthInfo, error) {
 
 // --- internal /api/ calls mapping onto daemon endpoints (server.go routes) ---
 
-// createSessionResult mirrors the daemon's create-session response.
+// createSessionResult mirrors the daemon's create-session response. Preferences
+// ride this response (design D4) so the plugin never reads the config file.
 type createSessionResult struct {
 	Session         *store.Session `json:"session"`
 	ExistingSameCWD *store.Session `json:"existing_same_cwd"`
+	Preferences     preferences    `json:"preferences"`
+}
+
+// preferences is the skill-presentation block delivered through debug_start
+// (design D4): verbosity and color, resolved by the daemon from effective config.
+type preferences struct {
+	Verbosity string `json:"verbosity"`
+	Color     string `json:"color"`
 }
 
 func (c *daemonClient) createSession(ctx context.Context, description, cwd string) (createSessionResult, error) {

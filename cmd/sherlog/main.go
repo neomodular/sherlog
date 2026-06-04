@@ -49,6 +49,8 @@ func run(args []string) error {
 		return cmdProbes(args[1:])
 	case "notes":
 		return cmdNotes(args[1:])
+	case "config":
+		return cmdConfig(os.Stdout, args[1:])
 	case "--version", "-version", "version":
 		fmt.Println("sherlog", version)
 		return nil
@@ -152,6 +154,10 @@ usage:
   sherlog probes --stale    list probes registered but not yet removed
   sherlog notes [--category <c>]
                             read agent field notes about sherlog itself
+  sherlog config list       print every config key, value, and source
+  sherlog config get <key>  print one config value
+  sherlog config set <key> <value>
+                            validate and persist one config value
   sherlog --version         print the version
 `)
 }

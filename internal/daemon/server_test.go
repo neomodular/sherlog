@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomodular/sherlog/internal/config"
 	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
 )
@@ -31,7 +32,7 @@ func newTestServerAt(t *testing.T, root string) (*Server, *store.Store) {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	srv := NewServer(st, "test")
+	srv := NewServer(st, "test", config.Default())
 	srv.awaiter.debounce = 150 * time.Millisecond
 	srv.awaiter.poll = 10 * time.Millisecond
 	return srv, st
@@ -495,7 +496,7 @@ func TestLoopbackListener(t *testing.T) {
 		t.Errorf("listener host = %q, want 127.0.0.1 (loopback only, D4)", host)
 	}
 
-	hs := &http.Server{Handler: NewServer(st, "test")}
+	hs := &http.Server{Handler: NewServer(st, "test", config.Default())}
 	go hs.Serve(ln)
 	defer hs.Close()
 
