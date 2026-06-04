@@ -94,6 +94,34 @@ development but is not yet packaged; brew covers macOS and Linux.)
 The `sherlog mcp` process auto-spawns the daemon (detached) if port 2218 is not
 already answering, so there is no separate daemon to start.
 
+## Case Board (browser UI)
+
+While the daemon is running, open **`http://127.0.0.1:2218/`** in any browser to
+watch the investigation. The Case Board is served by the daemon itself (embedded
+in the binary — no install, no separate process, no external requests):
+
+- **Cases** — every investigation, open ones first, then closed cases with a
+  one-line resolution (root cause + fix) so the archive of solved bugs is
+  browsable.
+- **Case detail** — the suspect board (each hypothesis with its status and
+  evidence note), the probe registry with `file:line`, the run timeline with
+  verdicts, and an **evidence tail that streams live** while you reproduce the
+  bug — the "watch the detective work" view, with no page reload.
+- **Run comparison** — pick any two runs and see each probe side by side
+  (counts and sample values); divergent probes are pinned to the top, so the
+  difference between a failing run and a fixed-check run jumps out.
+- **Stale probes** — every registered-but-not-removed probe across all cases,
+  with the `file:line` to delete.
+
+![sherlog Case Board — case list](examples/board-screens/cases.png)
+
+> _Screenshot: the Cases view. More views (case detail, run comparison) are in
+> [`examples/board-screens/`](examples/board-screens/)._
+
+**The Case Board is strictly read-only.** It never closes, edits, or deletes
+anything — every mutation still goes through the `/debug` MCP tools. If
+`SHERLOG_PORT` is set, the board is at that port instead.
+
 ## The probe contract
 
 A probe is **one fire-and-forget line** inserted into your code. The rules:
@@ -137,6 +165,13 @@ sherlog is built for local debugging only, with defense in depth:
   stores, they never leave your machine: there is no upload or telemetry anywhere.
   Read them with `sherlog notes` (`--category` to filter); delete the file to
   discard them.
+- **Read-only Case Board.** The browser UI (`http://127.0.0.1:2218/`) only ever
+  issues `GET` requests; it has no path to mutate sessions, probes, runs, or logs
+  — those stay exclusive to the MCP tools. It is served on the same loopback
+  listener and is not reachable off the machine. Be aware that it exposes
+  investigation data — including values seen by probes — to **any local browser
+  user**: the same trust boundary as the files under `~/.sherlog`. If others share
+  your machine session, treat the board as you would those files.
 
 To override the port (e.g. 2218 is taken), set `SHERLOG_PORT`. Probe URLs are
 always generated from the template the daemon returns, so the override

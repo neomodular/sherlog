@@ -65,6 +65,39 @@ HOME=<tmp> SHERLOG_BIN=/tmp/sherlog SHERLOG_PORT=2299 go run sim.go
 (`sim.go` lives outside the module tree during testing so it stays out of
 `go build ./...`/`go test ./...`; its logic mirrors the table above.)
 
+## Case Board browser pass (automated, real browser via Playwright)
+
+The Case Board web UI (`http://127.0.0.1:2218/`) was driven in a real browser
+against the **live `sherlog daemon` binary** seeded with a two-run investigation
+(a token-refresh race) plus one closed, solved case (a discount-rounding bug).
+Every view was loaded and verified; screenshots are in
+[`board-screens/`](board-screens/).
+
+| View | What was verified | Screenshot |
+|---|---|---|
+| Cases (`#/cases`) | Open section first, then Closed; mascot sprite in the header; the closed case shows its root-cause/fix one-liner | [cases.png](board-screens/cases.png) |
+| Case detail (`#/case/<id>`) | Suspect board with statuses + evidence notes (h1 confirmed, h2/h3 killed), probe registry with `file:line`, run timeline with verdicts, evidence list with both runs' probe bodies, live indicator on the open case | [case-detail.png](board-screens/case-detail.png) |
+| Live evidence tail | With the case open in the browser, an `await_run` was opened and a `p2` hit fired over `/log/...`; the new row appeared in the tail **without a reload** (SSE `EventSource`) | — |
+| Run comparison (`#/case/<id>/diff/r1/r2`) | Two-run picker; side-by-side per-probe columns; `p1` shows `6×` `cachedToken:null/refreshing:true` (reproduced) vs `2×` `cachedToken:"tok-ok"/refreshing:false` (fixed-check) — the failing-vs-fixed signature | [run-compare.png](board-screens/run-compare.png) |
+| Stale probes (`#/stale`) | All three unremoved probes listed with `file:line`, owning case link, and suspect | — |
+| Closed case detail | Resolution panel (root cause, fix, confirmed suspect, closed-at); no live indicator (a closed case's evidence is final) | [closed-case.png](board-screens/closed-case.png) |
+
+Cross-cutting checks:
+
+- **Zero external requests.** The browser's network log over the whole pass
+  contained only `http://127.0.0.1:2299/...` requests (the test port) — no CDN,
+  font, or analytics host. The Go test `TestCaseBoardNoExternalURLs` greps every
+  embedded asset for absolute URLs and allows only `127.0.0.1`, so this holds in
+  CI too.
+- **No console errors** across all views (`0` errors, `0` warnings).
+- **Read-only.** Every request the UI issued was a `GET`; the root handler and the
+  browser-facing API routes reject all write verbs (covered by
+  `TestCaseBoardReadOnly` / `TestBrowserRoutesGETOnly`).
+
+The automated browser pass used Chromium (Playwright). The cross-engine pass on
+**Firefox** is left to the user (task 4.6 in `tasks.md` stays unchecked until a
+human confirms the second engine).
+
 ## Live dogfood (reserved for the user — task 6.4)
 
 Run `/debug` inside Claude Code against each example, following its README, and

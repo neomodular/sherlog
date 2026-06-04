@@ -22,13 +22,13 @@
 
 ## 4. Web UI
 
-- [ ] 4.1 Embedded asset pipeline: `internal/daemon/ui/` with go:embed, single page + vanilla JS modules, hash navigation, navy/coral theme + mascot header, no external requests
-- [ ] 4.2 Cases view (open first, closed with resolution one-liners) and case detail view (board, probes, runs, evidence list)
-- [ ] 4.3 Live evidence tail wired to SSE (EventSource with native reconnect), flood-truncation badges
-- [ ] 4.4 Run comparison view: two-run picker, side-by-side per-probe columns, divergent probes pinned
-- [ ] 4.5 Stale probes view
+- [x] 4.1 Embedded asset pipeline: `internal/daemon/ui/` with go:embed, single page + vanilla JS modules, hash navigation, navy/coral theme + mascot header, no external requests
+- [x] 4.2 Cases view (open first, closed with resolution one-liners) and case detail view (board, probes, runs, evidence list)
+- [x] 4.3 Live evidence tail wired to SSE (EventSource with native reconnect), flood-truncation badges
+- [x] 4.4 Run comparison view: two-run picker, side-by-side per-probe columns, divergent probes pinned
+- [x] 4.5 Stale probes view
 - [ ] 4.6 Manual cross-browser pass (Chromium + Firefox) against a live investigation; record findings in examples/DOGFOOD.md
 
 ## 5. Docs touch
 
-- [ ] 5.1 README: Case Board section with screenshot placeholder, URL, read-only note; security notes updated (local browser visibility = same boundary as ~/.sherlog)
+- [x] 5.1 README: Case Board section with screenshot placeholder, URL, read-only note; security notes updated (local browser visibility = same boundary as ~/.sherlog)

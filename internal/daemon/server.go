@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/neomodular/sherlog/internal/config"
+	"github.com/neomodular/sherlog/internal/daemon/ui"
 	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
 )
@@ -85,6 +86,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/cases", s.handleCases)              // GET session list with resolutions
 	s.mux.HandleFunc("/api/probes/stale", s.handleStaleProbes) // GET stale probes across sessions
 	s.mux.HandleFunc("/api/events", s.handleEvents)            // GET SSE stream for a session
+
+	// The Case Board single-page app, embedded via go:embed (case-board-ui spec;
+	// design D1). Bound to the bare "/" — ServeMux dispatches by longest-prefix
+	// match, so "/" is the least-specific pattern and handles only paths no
+	// more-specific route above claimed (registration order is irrelevant). That
+	// lets the client-side hash router own UI navigation. GET-only, enforced inside
+	// the handler (design D2).
+	s.mux.Handle("/", ui.Handler())
 }
 
 // --- Public: log ingest (D3, spec: Localhost HTTP log ingestion) ---
