@@ -33,9 +33,12 @@ from your PATH.
 1. **Binary** (Homebrew, macOS/Linux):
 
    ```sh
-   brew install neomodular/tap/sherlog
+   brew tap neomodular/tap
+   brew install sherlog
    sherlog --version
    ```
+
+   (Equivalent one-liner: `brew install neomodular/tap/sherlog`.)
 
 2. **Plugin** (Claude Code): add this repository as a plugin marketplace source
    and install the `sherlog` plugin. It ships `.mcp.json`, which launches
