@@ -21,6 +21,7 @@ export const api = {
   cases: () => getJSON("/api/cases"),
   session: (id) => getJSON(`/api/sessions/${encodeURIComponent(id)}`),
   staleProbes: () => getJSON("/api/probes/stale"),
+  stats: () => getJSON("/api/stats"),
   diff: (id, a, b) =>
     getJSON(
       `/api/sessions/${encodeURIComponent(id)}/diff?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`

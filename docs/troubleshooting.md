@@ -2,6 +2,13 @@
 
 Organized by the symptom you observe. Find your symptom, work down its checklist.
 
+> **Check the Health view first.** With the daemon running, open the Case Board's
+> **Health** tab (`http://127.0.0.1:2218/#/health`). It answers "is sherlog healthy
+> and what is it doing" at a glance — vitals and uptime, effective config with where
+> each value came from, the data directory and its usage, recent activity, and self-
+> checks (storage writable, loopback-only). A failing self-check is named in the
+> status header. Many of the checks below are visible there without a terminal.
+
 ## `/debug` is unavailable / the MCP server fails to start
 
 **Almost always: the `sherlog` binary is not on your PATH.** The plugin's MCP

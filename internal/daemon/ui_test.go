@@ -25,6 +25,7 @@ var uiPaths = []struct {
 	{"/detail.js", "javascript"},
 	{"/diff.js", "javascript"},
 	{"/stale.js", "javascript"},
+	{"/health.js", "javascript"},
 }
 
 // TestCaseBoardServed covers the Case Board serving guarantee (case-board-ui spec:

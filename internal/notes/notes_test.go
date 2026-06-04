@@ -16,6 +16,25 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+// TestCount covers the field-notes count accessor (add-health-page): zero before any
+// file exists, then the number of appended notes.
+func TestCount(t *testing.T) {
+	s := newTestStore(t)
+
+	if n, err := s.Count(); err != nil || n != 0 {
+		t.Fatalf("Count on empty = %d, %v; want 0, nil", n, err)
+	}
+	if _, err := s.Append("a", "1.0", CategoryToolBug, "one"); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := s.Append("b", "1.0", CategoryOther, "two"); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if n, err := s.Count(); err != nil || n != 2 {
+		t.Errorf("Count = %d, %v; want 2, nil", n, err)
+	}
+}
+
 // TestAppendAndList covers the round trip: appended notes come back in append
 // order (oldest first) with every field preserved (field-notes D1).
 func TestAppendAndList(t *testing.T) {

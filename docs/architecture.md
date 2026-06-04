@@ -32,6 +32,13 @@ sherlog is a single Go binary that runs in two modes, plus a Claude Code plugin.
   public probe-ingest surface (`/log/`, `/health`, with permissive CORS so
   browser probes work), an internal `/api/` surface the MCP process drives (no
   CORS — server-side only), and a GET-only browser **Case Board** at `/`.
+  - `/health` (public) is the frozen machine check: `{version, uptime, config}`.
+  - `/api/stats` (browser-read, no CORS) is the human health aggregation behind
+    the Case Board's Health view — vitals, effective config with sources, storage
+    (data dir, disk usage, session/event/note counts), activity (last event,
+    trailing-hour events, live SSE subscribers, open run), the stale-probe count,
+    and boolean self-checks (`storage_writable`, `loopback_only`). It is separate
+    from `/health` so that contract stays O(1) and unchanged.
 - **MCP server** (`sherlog mcp`) — the stdio MCP server the plugin launches. It
   holds no investigation state; every tool call routes to the daemon's `/api/`.
   Before each call it ensures the daemon is up, auto-spawning a detached

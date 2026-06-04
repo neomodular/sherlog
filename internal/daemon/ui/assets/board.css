@@ -180,3 +180,41 @@ tr.divergent td { background: #fff4f2; }
 .tabs { display: flex; gap: 0.5rem; margin: 1rem 0 0.5rem; }
 .tabs a { font-size: 0.85rem; padding: 0.25rem 0.6rem; border: 1px solid var(--paper-line); border-radius: var(--radius); color: var(--navy); }
 .tabs a.active { background: var(--navy); color: #fff; }
+
+/* --- health view --- */
+.health-status {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: var(--navy-deep);
+  color: var(--paper);
+  border-radius: var(--radius);
+  padding: 0.85rem 1.25rem;
+  margin-bottom: 1rem;
+  border-left: 4px solid var(--ok);
+}
+.health-status.fail { border-left-color: var(--kill); }
+.health-status .sprite { font-size: 0.45rem; color: var(--coral); }
+.health-status .sprite::first-line { color: #fff; }
+.health-status .status-msg { font-size: 1.15rem; font-weight: 700; letter-spacing: 0.02em; }
+.health-status.ok .status-msg { color: #fff; }
+.health-status.fail .status-msg { color: var(--coral); font-weight: 600; font-size: 0.95rem; line-height: 1.4; }
+
+.health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.4rem 1.5rem; }
+.kv { display: flex; justify-content: space-between; gap: 1rem; padding: 0.2rem 0; border-bottom: 1px solid var(--paper-line); }
+.kv .k { color: var(--muted); }
+.kv .v { color: var(--ink); text-align: right; word-break: break-word; }
+.mono { font-family: var(--mono); font-size: 0.85em; }
+
+.src {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+}
+.src-default { background: #d9d2c4; color: var(--navy-ink); }
+.src-file { background: #dbe4f4; color: var(--navy); }
+.src-env { background: #f6e6c4; color: var(--warn); }

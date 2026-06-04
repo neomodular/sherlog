@@ -131,6 +131,7 @@ type Store struct {
 
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
+	counters ingestCounters // activity facts for the health view (add-health-page D2)
 
 	// subMu guards the subscriber set independently of mu (design D3): publish
 	// must never run under mu, so event fan-out cannot serialize against ingest or
@@ -759,6 +760,10 @@ func (s *Store) Ingest(sessionID, probeID string, body any, raw string) error {
 
 	ev := LogEvent{TS: time.Now().UTC(), Run: run, Probe: probeID, Body: body, Raw: raw}
 	entry.recordEvent(ev, s.floodN)
+	// Activity counters are mutated here, under s.mu, so the health view's totals and
+	// hourly window stay consistent with the in-memory event record (add-health-page
+	// D2). They count every ingested event regardless of flood-control retention.
+	s.counters.recordIngest(ev.TS)
 
 	// Two-pass replay (replayLogs loads all events before applying any marker) is
 	// the primary guarantee that an adopted orphan survives restart regardless of

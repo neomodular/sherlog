@@ -6,6 +6,7 @@ import { renderCases } from "./cases.js";
 import { renderDetail, closeStream } from "./detail.js";
 import { renderDiff } from "./diff.js";
 import { renderStale } from "./stale.js";
+import { renderHealth, stopHealth } from "./health.js";
 import { api } from "./api.js";
 import { esc } from "./render.js";
 
@@ -23,8 +24,10 @@ function setNav(route) {
 //   #/case/<id>                     → case detail (+ live tail when open)
 //   #/case/<id>/diff[/<a>/<b>]      → run comparison
 //   #/stale                         → stale probes
+//   #/health                        → daemon health (polls /api/stats)
 async function route() {
   closeStream(); // release any prior case's SSE subscriber before switching views
+  stopHealth(); // stop any prior health-view polling before switching views
   const hash = location.hash.replace(/^#\/?/, "");
   const parts = hash.split("/").filter(Boolean);
 
@@ -35,6 +38,10 @@ async function route() {
   if (parts[0] === "stale") {
     setNav("stale");
     return renderStale(view);
+  }
+  if (parts[0] === "health") {
+    setNav("health");
+    return renderHealth(view);
   }
   if (parts[0] === "case" && parts[1]) {
     setNav("cases");

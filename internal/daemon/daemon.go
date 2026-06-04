@@ -52,8 +52,16 @@ func Run(version string) error {
 		return bindError(addr, cfg.Port, err)
 	}
 
+	handler := NewServer(st, version, cfg)
+	// Confirm the loopback_only self-check against the real bound host rather than
+	// the default (add-health-page D3). JoinHostPort above always uses 127.0.0.1, so
+	// this is belt-and-suspenders, but it keeps the check honest if the bind changes.
+	if host, _, splitErr := net.SplitHostPort(ln.Addr().String()); splitErr == nil {
+		handler.SetBindHost(host)
+	}
+
 	srv := &http.Server{
-		Handler: NewServer(st, version, cfg),
+		Handler: handler,
 		// Generous header timeout guards against slowloris on a localhost-only
 		// service; no overall write/read timeout because await_run long-polls.
 		ReadHeaderTimeout: 5 * time.Second,

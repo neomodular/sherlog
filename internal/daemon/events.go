@@ -52,6 +52,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	sub := s.store.Subscribe()
 	defer sub.Unsubscribe()
 
+	// Track this live subscriber for the health view's activity panel (add-health-page
+	// D2). Increment after a successful Subscribe and decrement on return so the gauge
+	// reflects exactly the streams currently connected, no matter how the handler exits.
+	s.subscribers.Add(1)
+	defer s.subscribers.Add(-1)
+
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")

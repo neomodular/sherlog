@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/neomodular/sherlog/internal/config"
@@ -36,6 +37,23 @@ type Server struct {
 	version string
 	started time.Time
 	mux     *http.ServeMux
+
+	// bindHost is the host the daemon's listener is bound to, used by the
+	// loopback_only self-check (add-health-page D3). It defaults to 127.0.0.1 — the
+	// only host Run ever binds (daemon.go, D4) — and Run confirms it from the actual
+	// listener address so the check reflects reality rather than an assumption.
+	bindHost string
+
+	// subscribers is the live SSE subscriber gauge for the health view's activity
+	// panel (add-health-page D2). It is an atomic counter, not store state, because
+	// it is a process fact owned by the daemon's stream handler; handleEvents bumps
+	// it on connect and on disconnect.
+	subscribers atomic.Int64
+
+	// disk caches the last ~/.sherlog size walk for ≤5s so /api/stats stays cheap
+	// under the health view's polling (add-health-page D2): a refreshing page must
+	// not re-walk the data directory every 5s.
+	disk diskUsageCache
 }
 
 // NewServer builds the Server and its route table over the given store, wiring the
@@ -45,12 +63,13 @@ type Server struct {
 // is non-fatal — notes are best-effort telemetry, never an investigation gate.
 func NewServer(s *store.Store, version string, cfg config.Effective) *Server {
 	srv := &Server{
-		store:   s,
-		awaiter: newAwaitEngine(s, time.Duration(cfg.AwaitDebounceSeconds)*time.Second, time.Duration(cfg.AwaitMaxTimeoutSeconds)*time.Second),
-		cfg:     cfg,
-		version: version,
-		started: time.Now(),
-		mux:     http.NewServeMux(),
+		store:    s,
+		awaiter:  newAwaitEngine(s, time.Duration(cfg.AwaitDebounceSeconds)*time.Second, time.Duration(cfg.AwaitMaxTimeoutSeconds)*time.Second),
+		cfg:      cfg,
+		version:  version,
+		started:  time.Now(),
+		mux:      http.NewServeMux(),
+		bindHost: "127.0.0.1", // the only host Run binds (D4); SetBindHost confirms it
 	}
 	if n, err := notes.New(notes.WithRoot(s.Root())); err == nil {
 		srv.notes = n
@@ -78,6 +97,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/sessions", s.handleSessions)     // POST create, GET resume-latest
 	s.mux.HandleFunc("/api/sessions/", s.handleSessionByID) // GET state, DELETE close, plus sub-resources
 	s.mux.HandleFunc("/api/notes", s.handleNotes)           // POST file a field note (field-notes D2)
+	s.mux.HandleFunc("/api/stats", s.handleStats)           // GET health aggregation (add-health-page D1)
 
 	// Browser-facing read surface for the Case Board (case-board-ui spec). Every
 	// route here is GET-only (design D2: the UI never gains a write path); the

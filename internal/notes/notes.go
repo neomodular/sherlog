@@ -133,6 +133,34 @@ func (s *Store) Append(session, version string, category Category, note string) 
 	return n, nil
 }
 
+// Count returns the number of field notes on file, the health view's "field-notes
+// count" (add-health-page). An absent file is zero, not an error (no file = no
+// notes); a torn final line is skipped, matching List. It scans line-by-line
+// rather than materializing every note so a large inbox stays cheap.
+func (s *Store) Count() (int, error) {
+	f, err := os.Open(s.path())
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("open notes file: %w", err)
+	}
+	defer f.Close()
+
+	n := 0
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		if len(sc.Bytes()) > 0 {
+			n++
+		}
+	}
+	if err := sc.Err(); err != nil && !errors.Is(err, io.EOF) {
+		return 0, fmt.Errorf("scan notes file: %w", err)
+	}
+	return n, nil
+}
+
 // List returns all field notes chronologically (file order, newest last — append
 // order). A category other than "" filters to that category (D4). An absent notes
 // file yields an empty slice, not an error (pure-addition migration: no file = no
