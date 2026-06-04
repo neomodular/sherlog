@@ -1,0 +1,149 @@
+# Design: add-sherlog-mvp
+
+## Context
+
+Sherlog is a greenfield project: a hypothesis-driven debugging tool for Claude Code, modeled on Cursor's debug loop but architected around a resident local daemon instead of a log folder. The reference for the overall packaging pattern is [engram](https://github.com/Gentleman-Programming/engram): a Claude Code plugin whose MCP server is a single Go binary distributed via Homebrew.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  user's app (any language, incl. browser JS)                │
+│  fetch("http://127.0.0.1:2218/log/<sess>/<probe>",          │
+│        {method:"POST", body: JSON.stringify({...})})         │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ HTTP, localhost only
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  sherlog daemon (Go)                                         │
+│  ingest │ session state │ hypothesis board │ runs │ query   │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ same binary, `sherlog mcp` stdio mode
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Claude Code plugin: MCP tools + /debug skill (the brain)    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The debug loop the system serves:
+
+```
+hypothesize (≥3 suspects) → place probes → user reproduces (blocking wait)
+→ query evidence → kill/refine suspects → fix → user retests → verify via
+probes → cleanup (guaranteed) → "elementary."
+```
+
+## Goals / Non-Goals
+
+**Goals:**
+- Blocking wait: Claude suspends on `await_run` until evidence arrives or timeout — no "type done when ready".
+- Query-not-dump: evidence enters Claude's context only as filtered/aggregated query results, never raw log dumps.
+- Universal probes: a single clean line of code in any language, including browser JavaScript; the probe can never break or block the host app.
+- Investigation memory: hypothesis board, probe registry, and run history live in the daemon; `/debug resume` reconstructs an investigation after compaction, `/clear`, crash, or days later.
+- Cleanup guarantee at the infrastructure level: every registered probe is findable and removable, even by a later session.
+- Brew-installable single binary; plugin installs the MCP server with zero extra setup.
+
+**Non-Goals (MVP):**
+- `diff_runs` automated differential analysis (post-MVP; runs are tagged with verdicts now so the data is ready).
+- Stdout/stderr capture, wrapper commands, or any code injection beyond the one probe line.
+- TUI / `sherlog watch` live log viewer.
+- Windows packaging (scoop/winget) — `go build` works on Windows for development, packaging deferred.
+- Remote/deployed app debugging — localhost only.
+- Pre-commit hooks for leftover probes (post-MVP; `sherlog probes --stale` covers the gap).
+
+## Decisions
+
+### D1: Go over Rust
+Single static binary, trivial cross-compilation, goreleaser automates brew tap + archives from one config, and engram provides a proven Go reference for the exact plugin+binary+brew pipeline. Rust offers no advantage that matters here; the daemon is I/O-bound and tiny.
+
+### D2: One dual-mode binary (engram pattern)
+`sherlog daemon` runs the resident HTTP server; `sherlog mcp` runs an MCP stdio server that the plugin's `.mcp.json` launches. The MCP process talks to the daemon over localhost HTTP and **auto-spawns the daemon (detached) if port 2218 is not answering**. One install, no separate daemon setup step. Alternative considered: separate daemon and MCP binaries — rejected, doubles distribution surface for no benefit.
+
+### D3: Probe transport — one-line HTTP POST, JSON body sent as a CORS "simple request"
+The probe is a single fire-and-forget line; canonical JS form:
+```js
+fetch("http://127.0.0.1:2218/log/<session>/<probe>", {method: "POST", body: JSON.stringify({token, retries})}).catch(() => {})
+```
+- **No `Content-Type: application/json` header is ever set.** Bodies default to `text/plain`, which keeps browser probes "simple requests" — no CORS preflight. The daemon ignores Content-Type and attempts `JSON.parse` on every body; on failure the body is stored as a raw string. A probe can therefore never fail validation.
+- Equivalent one-liners per ecosystem are documented in the skill (Python `urllib`/`requests` if present, Go `http.Post`, Ruby `Net::HTTP`, curl for shell). The skill prefers whatever HTTP facility the codebase already uses.
+- Alternatives rejected: stdout capture + wrapper (`changes how the user runs their app`), SDK/import injection (pollutes diffs, per-language maintenance).
+
+### D4: Fixed port 2218, unguessable session path
+Port 2218 (Baker Street 221B) is the brand and what makes probe lines instantly recognizable in diffs. Session IDs are short random tokens (e.g. 8 chars base36) generated by `debug_start`; since any webpage can POST to localhost ports, an unguessable path segment makes drive-by log injection useless. If 2218 is occupied by a foreign process, daemon startup fails with a clear error and `SHERLOG_PORT` overrides (probe URLs are always generated from the template returned by `debug_start`, so a custom port flows through automatically).
+
+### D5: Storage — in-memory with JSONL/JSON persistence, no database
+Per session under `~/.sherlog/sessions/<id>/`:
+- `state.json` — bug description, status, hypothesis board, probe registry, run list (rewritten atomically on every mutation)
+- `logs.jsonl` — append-only log events `{ts, run, probe, body, raw}`
+The daemon keeps everything in memory and replays files on restart. Rationale: zero dependencies, pure-Go cross-compilation stays trivial (no CGO/SQLite), files are human-inspectable, and debug-session volumes (thousands of events, not millions) don't need an index. Flood control (D8) bounds memory. Alternative considered: SQLite via modernc.org — deferred until query needs outgrow JSONL.
+
+### D6: Hypothesis board lives in the daemon
+MCP tools mutate hypotheses (`add`, `update status: active|killed|confirmed`, evidence notes attached to runs/probes). This is what makes investigations resumable across context death and is the source of truth for `/debug resume`. The skill never relies on conversation memory for investigation state.
+
+### D7: Runs as first-class records
+`await_run` opens a run; the user's verdict closes it (`reproduced` / `not-reproduced` / `fixed-check`). Every log event is stamped with its run. This gives the skill per-run probe summaries ("probe p3 never fired in run 2") and leaves the data shaped for post-MVP `diff_runs`.
+
+### D8: `await_run` semantics and flood control
+- `await_run(timeout_s)` long-polls the daemon: returns early once log flow goes quiet after first activity (debounce ~2s), else at timeout. The tool result includes a per-probe summary (count, first/last events), not raw logs. The skill then asks the user for the verdict and records it via `close_run`.
+- Flood control: per probe per run, the daemon stores first N (default 20) and last N events plus a total counter; the middle is dropped. Query results always disclose truncation ("p2 fired 48,201×; first/last 5 shown").
+
+### D9: MCP tool surface
+| Tool | Purpose |
+|---|---|
+| `debug_start(bug_description)` | create session → session id + probe URL template |
+| `debug_resume(session_id?)` | latest-or-named session → full investigation state |
+| `set_hypotheses(list)` / `update_hypothesis(id, status, note)` | board mutations |
+| `register_probe(id, file, line, hypothesis_id, note)` | registry entry per placed probe |
+| `remove_probe(id)` | mark removed after cleanup edit |
+| `await_run(timeout_s)` | open run + blocking wait → per-probe summary |
+| `close_run(verdict)` | record user verdict |
+| `query_logs(filters)` | by probe/run/limit; counts + selected events |
+| `debug_end()` | close session → list of probes not yet marked removed |
+
+### D10: Cleanup guarantee
+The probe URL itself is the marker — `127.0.0.1:2218/log/<session>` is greppable with zero false positives. `debug_end` returns every probe whose `removed` flag is unset; the skill removes them and then greps the repo for the session URL fragment, requiring zero matches before declaring "case closed". `sherlog probes --stale` (CLI) lists registered-but-not-removed probes across all sessions for the "weeks later" safety net.
+
+### D11: Plugin anatomy
+```
+sherlog-plugin/
+├── .claude-plugin/plugin.json     # name, version, mascot in description
+├── .mcp.json                      # { "sherlog": { command: "sherlog", args: ["mcp"] } }
+└── skills/
+    └── debug/SKILL.md             # the detective loop
+```
+Skill discipline encoded in SKILL.md: ≥3 initial hypotheses; every hypothesis gets ≥1 *discriminating* probe (distinguishes it from rivals, not just "got here"); kill/split rules after each run; fix → `await_run` retest → verify expected probe behavior change → cleanup → grep check; ask-don't-assume for the run verdict. Detective theming: "suspects", "evidence", "the game is afoot" (await), "elementary." (root cause confirmed), "case closed" (cleanup verified).
+
+### D12: Mascot and banner (locked)
+Exact Clawd glyphs plus a two-row inspector cap; cap rendered navy (ANSI 256 / truecolor), body coral, terminal-background eyes untouched:
+```
+     ▄▄▄▄
+ ▄▄████████▄▄
+   ▐▛███▜▌
+  ▝▜█████▛▘
+    ▘▘ ▝▝
+```
+Printed by the skill at `debug_start` with the case line, e.g. `sherlog · case #a3f9 · 3 suspects · 5 probes · watching :2218`. Art never changes between states; only the status text does. Illustrated mascot (README/social, post-MVP asset) is the **same character drawn properly** — coral Clawd-cousin with navy deerstalker, matching the terminal sprite; the character may be named Watson (Claude is Holmes, the daemon watches).
+
+### D13: MCP SDK — official `modelcontextprotocol/go-sdk`
+The tool surface is small (10 simple tools, no resources/prompts), so API churn in the young official SDK has minimal blast radius, and staying on the canonical SDK tracks the spec's future. Alternative considered: `mark3labs/mcp-go` (more battle-tested) — rejected in favor of spec alignment.
+
+### D14: Single repository
+One repo holds the Go source, `.claude-plugin/`, skill, and goreleaser config; the brew formula and marketplace listing both point at it (engram pattern). Plugin and binary version together — tool schemas must match — so one release tag drives both. Alternative considered: split binary/plugin repos — rejected; only pays off if the plugin iterates independently, which it won't.
+
+## Risks / Trade-offs
+
+- [Probe line blocks or throws in exotic runtimes] → canonical forms are fire-and-forget (`.catch(() => {})`, daemon answers in <1ms, 200 always); skill instructs never to await the probe call.
+- [Browser preflight breaks probes] → no JSON content-type ever; POST text/plain = simple request; daemon sets permissive CORS headers anyway as belt-and-suspenders.
+- [Daemon not running when probes fire] → probes fail silently by design (fire-and-forget); `await_run` returning zero events prompts the skill to run a connectivity check (`curl` the health endpoint) before blaming the hypothesis.
+- [Port 2218 taken] → fail fast with clear message + `SHERLOG_PORT`; probe URL template always comes from the daemon so overrides propagate.
+- [Log flood from probe in hot loop] → first/last-N + counter per probe per run (D8); truncation always disclosed.
+- [MCP client times out a long `await_run`] → default `timeout_s` of 120 with skill guidance to re-invoke `await_run` (idempotent: re-attaches to the open run) for longer reproductions.
+- [Orphaned probes despite registry] → triple net: registry diff at `debug_end`, grep-for-URL gate before "case closed", `sherlog probes --stale` CLI.
+- [Drive-by localhost POST spam] → unguessable session path; events for unknown sessions are dropped.
+- [Two sessions debugging the same repo concurrently] → allowed; sessions are independent and probe URLs disambiguate. The skill warns if `debug_start` finds another open session for the same cwd.
+
+## Migration Plan
+
+Greenfield — no migration. Rollout: repo with Go module + plugin dir → goreleaser builds darwin/linux (arm64/amd64) → Homebrew tap (`brew install <org>/tap/sherlog`) → plugin published to marketplace pointing at the brew dependency. Rollback: uninstall plugin + `brew uninstall sherlog`; `~/.sherlog/` is plain files, delete to reset.
+
+## Open Questions
+
+None — all resolved (see D13: official MCP Go SDK, D14: single repository, D12: illustrated mascot is the blob-cousin matching the terminal sprite).
