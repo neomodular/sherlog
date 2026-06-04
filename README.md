@@ -37,10 +37,16 @@ from your PATH.
    sherlog --version
    ```
 
-2. **Plugin** (Claude Code): add this repository as a plugin marketplace source
-   and install the `sherlog` plugin. It ships `.mcp.json`, which launches
-   `sherlog mcp`; once the binary is on PATH, `/debug` is available with no
-   further configuration.
+2. **Plugin** (Claude Code): inside any Claude Code session, run:
+
+   ```
+   /plugin marketplace add neomodular/sherlog
+   /plugin install sherlog@sherlog
+   ```
+
+   then restart Claude Code (or `/reload-plugins`). The plugin ships
+   `.mcp.json`, which launches `sherlog mcp`; once the binary is on PATH,
+   `/debug` is available with no further configuration.
 
 If the plugin's MCP server fails to start, the binary is almost certainly not on
 PATH — re-run the `brew install` above, or see
