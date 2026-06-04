@@ -296,6 +296,33 @@ func (s *Store) GetSession(id string) (*Session, error) {
 	return cloneSession(entry.session), nil
 }
 
+// ListSessions returns a copy of every session for the Case Board's case list,
+// ordered open-first then closed, each group most-recent-first (case-board-ui
+// spec: open first, then closed). Open sessions sort by creation time; closed
+// ones by close time so the freshly solved case leads the archive. Copies are
+// defensive — callers never receive pointers into live store state.
+func (s *Store) ListSessions() []*Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]*Session, 0, len(s.sessions))
+	for _, entry := range s.sessions {
+		out = append(out, cloneSession(entry.session))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		oi, oj := out[i].ClosedAt == nil, out[j].ClosedAt == nil
+		if oi != oj {
+			return oi // open sessions first
+		}
+		if oi { // both open: newest created first
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		// Both closed: newest close first so the latest solved case leads.
+		return out[i].ClosedAt.After(*out[j].ClosedAt)
+	})
+	return out
+}
+
 // ResumeLatest returns the most recently created open session for debug_resume
 // with no argument (spec: Investigation resume). ErrNoOpenSession when none.
 func (s *Store) ResumeLatest() (*Session, error) {

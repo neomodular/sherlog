@@ -77,6 +77,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/sessions", s.handleSessions)     // POST create, GET resume-latest
 	s.mux.HandleFunc("/api/sessions/", s.handleSessionByID) // GET state, DELETE close, plus sub-resources
 	s.mux.HandleFunc("/api/notes", s.handleNotes)           // POST file a field note (field-notes D2)
+
+	// Browser-facing read surface for the Case Board (case-board-ui spec). Every
+	// route here is GET-only (design D2: the UI never gains a write path); the
+	// read-only guarantee is enforced per handler and covered by an integration
+	// guard test. The session-detail view reuses GET /api/sessions/<id> above.
+	s.mux.HandleFunc("/api/cases", s.handleCases)              // GET session list with resolutions
+	s.mux.HandleFunc("/api/probes/stale", s.handleStaleProbes) // GET stale probes across sessions
+	s.mux.HandleFunc("/api/events", s.handleEvents)            // GET SSE stream for a session
 }
 
 // --- Public: log ingest (D3, spec: Localhost HTTP log ingestion) ---
@@ -237,6 +245,7 @@ func (s *Server) resumeLatest(w http.ResponseWriter, r *http.Request) {
 //	POST   /api/sessions/<id>/await           → open-or-attach run + blocking wait
 //	POST   /api/sessions/<id>/runs/close      → record verdict on latest open run
 //	GET    /api/sessions/<id>/query           → filtered logs
+//	GET    /api/sessions/<id>/diff?a=&b=       → per-probe run comparison (browser-facing)
 func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
 	if rest == "" {
@@ -265,6 +274,8 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		s.closeRun(w, r, sessionID)
 	case sub[0] == "query" && len(sub) == 1:
 		s.queryLogs(w, r, sessionID)
+	case sub[0] == "diff" && len(sub) == 1:
+		s.diffRuns(w, r, sessionID)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -440,6 +451,62 @@ func (s *Server) queryLogs(w http.ResponseWriter, r *http.Request, id string) {
 		results = []store.QueryResult{{Probe: f.Probe, Run: f.Run, Total: 0, Truncated: false, Events: []store.LogEvent{}}}
 	}
 	writeJSON(w, http.StatusOK, results)
+}
+
+// --- Browser-facing read surface (case-board-ui spec, design D2) ---
+
+// diffRuns serves the per-probe comparison of two runs of a session for the Case
+// Board's run-comparison view and the diff_runs MCP tool (log-query spec: Run
+// diff). The two run IDs are query params a and b. It is GET-only (read-only UI).
+// Invalid pairs map to a 400 rather than 404/500: naming the same run twice, or
+// either run missing, is a client request error the picker should surface — the
+// route reaches the store only with two distinct, named runs.
+func (s *Server) diffRuns(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	a, b := q.Get("a"), q.Get("b")
+	if a == "" || b == "" {
+		writeError(w, http.StatusBadRequest, errors.New("diff requires run ids a and b"))
+		return
+	}
+	diff, err := s.store.DiffRuns(id, a, b)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, diff)
+	case errors.Is(err, store.ErrSessionNotFound):
+		writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, store.ErrRunNotFound), errors.Is(err, store.ErrSameRun):
+		// An unknown or duplicate run is a malformed comparison request, not a
+		// server fault: surface it as a 400 the picker can show.
+		writeError(w, http.StatusBadRequest, err)
+	default:
+		writeError(w, http.StatusInternalServerError, err)
+	}
+}
+
+// handleCases serves the Case Board's case list: every session ordered open-first
+// then closed, each carrying its resolution when solved (case-board-ui spec: case
+// list). GET-only — this is a browser-facing read route (design D2).
+func (s *Server) handleCases(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.store.ListSessions())
+}
+
+// handleStaleProbes serves the Case Board's stale-probes view: every registered
+// but not-removed probe across all sessions (case-board-ui spec: stale probes
+// view — the browser equivalent of `sherlog probes --stale`). GET-only.
+func (s *Server) handleStaleProbes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.store.StaleProbes())
 }
 
 // --- Internal API: field notes (field-notes D2) ---

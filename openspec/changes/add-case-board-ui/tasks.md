@@ -10,9 +10,9 @@
 
 ## 2. Daemon: new endpoints + SSE
 
-- [ ] 2.1 Read endpoints for the UI: session list with resolutions, session detail, stale probes, `GET /api/sessions/<id>/diff?a=&b=`
-- [ ] 2.2 SSE endpoint `GET /api/events?session=<id>` bridging store pub/sub to `text/event-stream`, with per-subscriber buffering and drop-on-stall
-- [ ] 2.3 Integration tests: SSE delivery during ingest, subscriber stall drop, diff endpoint, read-only guarantee (UI routes are GET-only)
+- [x] 2.1 Read endpoints for the UI: session list with resolutions, session detail, stale probes, `GET /api/sessions/<id>/diff?a=&b=`
+- [x] 2.2 SSE endpoint `GET /api/events?session=<id>` bridging store pub/sub to `text/event-stream`, with per-subscriber buffering and drop-on-stall
+- [x] 2.3 Integration tests: SSE delivery during ingest, subscriber stall drop, diff endpoint, read-only guarantee (UI routes are GET-only)
 
 ## 3. MCP + skill
 
