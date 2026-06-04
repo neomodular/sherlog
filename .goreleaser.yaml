@@ -1,0 +1,91 @@
+# goreleaser config for sherlog (task 7.1/7.2).
+# One config drives all four targets and the Homebrew tap (D1, D14).
+#
+# Validate locally with: goreleaser release --clean --snapshot --skip=publish
+# Do NOT gate on `goreleaser check`: it exits non-zero on the deliberately
+# retained `brews` block (deprecation, not an error of substance — see the
+# `brews:` comment below). The release pipeline runs only `release --clean`
+# against the pinned v2.16.0, which exits 0 and emits the correct 4-target tap
+# formula; the standalone `check` failure is expected and waived.
+version: 2
+
+project_name: sherlog
+
+before:
+  hooks:
+    # Read-only at release time: fetch deps without mutating go.mod/go.sum
+    # (tidy is a dev-time maintenance op; CI verifies tidiness separately).
+    - go mod download
+
+builds:
+  - id: sherlog
+    main: ./cmd/sherlog
+    binary: sherlog
+    # Pure-Go static binary, no CGO — keeps cross-compilation trivial (D1, D5).
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # Inject the release version into main.version (the `var version` in
+    # cmd/sherlog/main.go, set per task 5.1). -s -w strip the symbol table.
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - arm64
+      - amd64
+
+archives:
+  - id: sherlog
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# Homebrew tap publication (task 7.2). A formula (not a cask) installs on both
+# macOS and Linux via `brew install neomodular/tap/sherlog`, covering all four
+# release targets (D14). Casks are macOS-only, so they would strand the required
+# linux/arm64 + linux/amd64 builds — `homebrew_casks`, the replacement for
+# `brews`, is therefore not viable here.
+#
+# `brews` is hard-deprecated as of goreleaser v2.16 (it still generates the
+# correct multi-OS formula and is only removed on a major version, i.e. v3).
+# This deprecation is accepted deliberately: `goreleaser check` reports a
+# deprecation warning, not an error of substance. The release pipeline pins
+# goreleaser to a known-good version (see .github/workflows/release.yml) so it
+# cannot float onto a release that drops `brews`; that pin must be bumped only
+# after re-validating `goreleaser check` against the new version.
+brews:
+  - name: sherlog
+    repository:
+      owner: neomodular
+      name: homebrew-tap
+      branch: main
+      # Cross-repo push needs a PAT with repo scope on the tap, supplied by CI
+      # as TAP_GITHUB_TOKEN (documented in .github/workflows/release.yml).
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/neomodular/sherlog"
+    description: "Hypothesis-driven debugging for Claude Code — the /debug detective loop over a localhost daemon on :2218"
+
+release:
+  github:
+    owner: neomodular
+    name: sherlog

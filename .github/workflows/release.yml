@@ -1,0 +1,44 @@
+name: Release
+
+# Tagging v* drives a full release: goreleaser builds the four targets, cuts a
+# GitHub release, and pushes the Homebrew formula to neomodular/homebrew-tap
+# (tasks 7.2, 7.3).
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub release + upload archives
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # goreleaser needs full history for the changelog
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: goreleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          # Pinned, not floating (`~> v2`): .goreleaser.yaml relies on the
+          # `brews` block, hard-deprecated since v2.16 and slated for removal in
+          # v3. A fixed version keeps releases reproducible and prevents a v2.x
+          # point release that drops `brews` from silently breaking the tap
+          # publish at tag time. Bump only after re-running `goreleaser check`.
+          version: "v2.16.0"
+          args: release --clean
+        env:
+          # Default token: creates the release in this repo.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with repo scope on neomodular/homebrew-tap so goreleaser can push
+          # the updated formula across repositories. Create it at
+          # Settings → Developer settings → Personal access tokens, then add it
+          # to this repo as the TAP_GITHUB_TOKEN secret.
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}

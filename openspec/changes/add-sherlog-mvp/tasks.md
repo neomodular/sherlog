@@ -47,8 +47,8 @@
 
 ## 7. Distribution (distribution)
 
-- [ ] 7.1 goreleaser config: pure-Go static builds for darwin/arm64, darwin/amd64, linux/arm64, linux/amd64; version injected via ldflags
+- [x] 7.1 goreleaser config: pure-Go static builds for darwin/arm64, darwin/amd64, linux/arm64, linux/amd64; version injected via ldflags
 - [ ] 7.2 Homebrew tap repo + formula publication from goreleaser; verify `brew install <org>/tap/sherlog && sherlog --version`
-- [ ] 7.3 Release workflow (tag → build → tap update) in CI
-- [ ] 7.4 README: install (brew + plugin), how it works diagram, probe contract, security notes (loopback-only, unguessable session paths), mascot
-- [ ] 7.5 Marketplace packaging/manifest for the plugin with brew prerequisite documented
+- [x] 7.3 Release workflow (tag → build → tap update) in CI
+- [x] 7.4 README: install (brew + plugin), how it works diagram, probe contract, security notes (loopback-only, unguessable session paths), mascot
+- [x] 7.5 Marketplace packaging/manifest for the plugin with brew prerequisite documented
