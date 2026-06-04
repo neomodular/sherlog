@@ -1,0 +1,13 @@
+{
+  "name": "sherlog",
+  "owner": {
+    "name": "neomodular"
+  },
+  "plugins": [
+    {
+      "name": "sherlog",
+      "source": "./",
+      "description": "Hypothesis-driven debugging for Claude Code: the /debug detective loop over a localhost daemon on :2218. Requires the sherlog binary on PATH — install it first with `brew install neomodular/tap/sherlog`."
+    }
+  ]
+}

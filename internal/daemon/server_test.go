@@ -251,7 +251,9 @@ func TestAwaitReAttach(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		do(srv, http.MethodPost, "/log/"+sess.ID+"/p1", `{"i":1}`)
 	}
-	second := awaitCall(t, srv, sess.ID, 5)
+	// Events fired before this await, so no change is seen during the wait and it
+	// resolves at timeout; 1s keeps the run identity assertion cheap.
+	second := awaitCall(t, srv, sess.ID, 1)
 	if second.Run.ID != "r1" {
 		t.Errorf("re-invocation opened a new run %q, want re-attach to r1", second.Run.ID)
 	}
@@ -347,6 +349,20 @@ func TestLoopbackListener(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
+
+	// Loopback-only binding (D4). We assert the bound host is the loopback
+	// address rather than attempting a network-level negative test (connecting
+	// from a non-loopback interface): that would require a routable second
+	// interface and would be flaky/sandbox-dependent in CI, whereas the bind
+	// address is the property the spec actually constrains.
+	host, _, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	if host != "127.0.0.1" {
+		t.Errorf("listener host = %q, want 127.0.0.1 (loopback only, D4)", host)
+	}
+
 	hs := &http.Server{Handler: NewServer(st, "test")}
 	go hs.Serve(ln)
 	defer hs.Close()

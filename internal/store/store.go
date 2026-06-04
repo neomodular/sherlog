@@ -19,6 +19,10 @@ var ErrNoOpenSession = errors.New("no open session")
 // ErrRunNotFound is returned when an operation targets an unknown run ID.
 var ErrRunNotFound = errors.New("run not found")
 
+// ErrNoOpenRun is returned by CloseLatestOpenRun when the session has no run
+// awaiting a verdict, letting the API answer 409 without a separate lookup.
+var ErrNoOpenRun = errors.New("no open run")
+
 // floodKey identifies one flood buffer: events are bounded per probe per run (D8).
 type floodKey struct {
 	run   string
@@ -456,6 +460,36 @@ func (s *Store) LatestOpenRun(sessionID string) (Run, bool, error) {
 		}
 	}
 	return Run{}, false, nil
+}
+
+// CloseLatestOpenRun records a verdict on the session's latest open run as a
+// single atomic operation, mirroring OpenOrAttachRun's discipline (D7). The
+// find-then-close pair across two lock acquisitions was TOCTOU-racy: a
+// concurrent close could leave the second caller acting on a stale run. Returns
+// ErrNoOpenRun when no run awaits a verdict so the API can answer 409.
+func (s *Store) CloseLatestOpenRun(sessionID string, verdict RunVerdict) (Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return Run{}, fmt.Errorf("close latest open run in %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	for i := len(entry.session.Runs) - 1; i >= 0; i-- {
+		r := &entry.session.Runs[i]
+		if r.ClosedAt != nil {
+			continue
+		}
+		now := time.Now().UTC()
+		r.ClosedAt = &now
+		r.Verdict = verdict
+		if err := s.writeState(entry.session); err != nil {
+			return Run{}, err
+		}
+		return *r, nil
+	}
+	return Run{}, fmt.Errorf("close latest open run in %q: %w", sessionID, ErrNoOpenRun)
 }
 
 // --- Ingest & query ---

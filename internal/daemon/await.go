@@ -10,10 +10,14 @@ import (
 
 // Default await tuning (D8). debounceQuiet is how long log flow must stay quiet
 // after first activity before await returns early; pollInterval is how often the
-// engine samples event counts to detect activity and quiet.
+// engine samples event counts to detect activity and quiet. defaultAwaitTimeout
+// is the wait length when the client sends none; maxAwaitTimeout bounds a
+// client-supplied timeout so a single await cannot pin a goroutine indefinitely.
 const (
 	defaultDebounceQuiet = 2 * time.Second
 	defaultPollInterval  = 100 * time.Millisecond
+	defaultAwaitTimeout  = 120 * time.Second // D8 default
+	maxAwaitTimeout      = 600 * time.Second
 )
 
 // awaitEngine implements the open-or-attach run + blocking wait of D8. It is

@@ -351,10 +351,15 @@ func (s *Server) awaitRun(w http.ResponseWriter, r *http.Request, id string) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if req.TimeoutS <= 0 {
-		req.TimeoutS = 120 // D8 default
+	timeout := defaultAwaitTimeout
+	if req.TimeoutS > 0 {
+		timeout = time.Duration(req.TimeoutS) * time.Second
 	}
-	timeout := time.Duration(req.TimeoutS) * time.Second
+	// Clamp client-supplied timeouts so a misconfigured caller cannot hold a
+	// daemon goroutine open far longer than any real reproduction needs.
+	if timeout > maxAwaitTimeout {
+		timeout = maxAwaitTimeout
+	}
 	res, err := s.awaiter.await(r.Context(), id, timeout)
 	if s.handleStoreErr(w, err) {
 		return
@@ -373,15 +378,14 @@ func (s *Server) closeRun(w http.ResponseWriter, r *http.Request, id string) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	run, open, err := s.store.LatestOpenRun(id)
-	if s.handleStoreErr(w, err) {
+	// Close atomically under one lock (D7): the latest-open lookup and the close
+	// are a single store op, so a concurrent close can't strand this caller on a
+	// stale run. No open run is a 409, not a 500.
+	closed, err := s.store.CloseLatestOpenRun(id, store.RunVerdict(req.Verdict))
+	if errors.Is(err, store.ErrNoOpenRun) {
+		writeError(w, http.StatusConflict, err)
 		return
 	}
-	if !open {
-		writeError(w, http.StatusConflict, errors.New("no open run to close"))
-		return
-	}
-	closed, err := s.store.CloseRun(id, run.ID, store.RunVerdict(req.Verdict))
 	if s.handleStoreErr(w, err) {
 		return
 	}

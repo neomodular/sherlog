@@ -75,7 +75,7 @@ development but is not yet packaged; brew covers macOS and Linux.)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  your app (any language, including browser JS)               │
+│  your app (any language, including browser JS)              │
 │  POST http://127.0.0.1:2218/log/<session>/<probe>           │
 └──────────────────────────┬──────────────────────────────────┘
                            │ HTTP, loopback only
@@ -87,7 +87,7 @@ development but is not yet packaged; brew covers macOS and Linux.)
                            │ same binary, `sherlog mcp` stdio mode
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Claude Code plugin: MCP tools + /debug skill (the brain)    │
+│  Claude Code plugin: MCP tools + /debug skill (the brain)   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
