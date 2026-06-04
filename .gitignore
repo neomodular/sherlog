@@ -20,3 +20,6 @@ go.work.sum
 
 # Local runtime data (sherlog writes sessions under ~/.sherlog, but never commit a local copy)
 /.sherlog/
+
+# MCP tool artifacts (Playwright console logs, etc.)
+/.playwright-mcp/
