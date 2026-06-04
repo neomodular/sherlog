@@ -8,12 +8,12 @@
 
 ## 2. Store (session-state)
 
-- [ ] 2.1 Implement in-memory store with atomic `state.json` writes and `logs.jsonl` appends under `~/.sherlog/sessions/<id>/`
-- [ ] 2.2 Implement startup recovery: replay `state.json` + `logs.jsonl` for all sessions (spec: state survives daemon restart)
-- [ ] 2.3 Implement session lifecycle: create (random ≥8-char base36 ID, cwd, description), close, same-cwd open-session detection
-- [ ] 2.4 Implement hypothesis board mutations (set/update with status + evidence notes) and probe registry (register/remove flags)
-- [ ] 2.5 Implement flood control: per probe per run keep first/last N (default 20) + exact counter
-- [ ] 2.6 Unit tests for store: lifecycle, recovery, flood control, concurrent session detection
+- [x] 2.1 Implement in-memory store with atomic `state.json` writes and `logs.jsonl` appends under `~/.sherlog/sessions/<id>/`
+- [x] 2.2 Implement startup recovery: replay `state.json` + `logs.jsonl` for all sessions (spec: state survives daemon restart)
+- [x] 2.3 Implement session lifecycle: create (random ≥8-char base36 ID, cwd, description), close, same-cwd open-session detection
+- [x] 2.4 Implement hypothesis board mutations (set/update with status + evidence notes) and probe registry (register/remove flags)
+- [x] 2.5 Implement flood control: per probe per run keep first/last N (default 20) + exact counter
+- [x] 2.6 Unit tests for store: lifecycle, recovery, flood control, concurrent session detection
 
 ## 3. Daemon HTTP Server (log-ingest)
 

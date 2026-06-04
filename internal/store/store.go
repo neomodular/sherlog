@@ -1,0 +1,629 @@
+package store
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"sort"
+	"strconv"
+	"sync"
+	"time"
+)
+
+// ErrSessionNotFound is returned when an operation targets an unknown session ID.
+var ErrSessionNotFound = errors.New("session not found")
+
+// ErrNoOpenSession is returned by ResumeLatest when no open session exists.
+var ErrNoOpenSession = errors.New("no open session")
+
+// ErrRunNotFound is returned when an operation targets an unknown run ID.
+var ErrRunNotFound = errors.New("run not found")
+
+// floodKey identifies one flood buffer: events are bounded per probe per run (D8).
+type floodKey struct {
+	run   string
+	probe string
+}
+
+// sessionEntry is the in-memory record for one session: its persisted state plus
+// the bounded log buffers that are not part of state.json (D5, D8).
+type sessionEntry struct {
+	session *Session
+	floods  map[floodKey]*floodBuffer
+	nextRun int // monotonic counter for human-friendly run IDs (r1, r2, ...)
+}
+
+// recordEvent feeds an event into the right flood buffer, creating it on demand.
+// Used both by live ingest and by recovery replay so the bounding logic lives in
+// exactly one place (DRY).
+func (e *sessionEntry) recordEvent(ev LogEvent, floodN int) {
+	key := floodKey{run: ev.Run, probe: ev.Probe}
+	buf := e.floods[key]
+	if buf == nil {
+		buf = newFloodBuffer(floodN)
+		e.floods[key] = buf
+	}
+	buf.add(ev)
+}
+
+// Store is the in-memory source of truth for all investigations, backed by
+// JSON/JSONL files under root (D5). It is safe for concurrent use: HTTP ingest
+// handlers and MCP tool calls hit it simultaneously, so every accessor guards
+// shared state with mu.
+type Store struct {
+	root   string
+	floodN int
+
+	mu       sync.Mutex
+	sessions map[string]*sessionEntry
+}
+
+// Option configures a Store.
+type Option func(*Store)
+
+// WithRoot overrides the storage root directory. Tests inject a temp dir; the
+// default is ~/.sherlog (D5).
+func WithRoot(root string) Option {
+	return func(s *Store) { s.root = root }
+}
+
+// WithFloodN overrides the first/last-N retained per probe per run (D8, default 20).
+func WithFloodN(n int) Option {
+	return func(s *Store) {
+		if n >= 1 {
+			s.floodN = n
+		}
+	}
+}
+
+// New creates a Store and recovers all persisted sessions from disk (D5: state
+// survives daemon restart). The default root is ~/.sherlog.
+func New(opts ...Option) (*Store, error) {
+	s := &Store{floodN: DefaultFloodN, sessions: map[string]*sessionEntry{}}
+	for _, opt := range opts {
+		opt(s)
+	}
+	if s.root == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve home dir for store root: %w", err)
+		}
+		s.root = home + string(os.PathSeparator) + ".sherlog"
+	}
+
+	recovered, err := s.recover()
+	if err != nil {
+		return nil, fmt.Errorf("recover sessions: %w", err)
+	}
+	s.sessions = recovered
+	// Restore each session's run counter so newly opened runs do not collide
+	// with IDs already on disk.
+	for _, entry := range s.sessions {
+		entry.nextRun = maxRunNumber(entry.session.Runs)
+	}
+	return s, nil
+}
+
+// Root reports the resolved storage root (used by the CLI to scan all sessions).
+func (s *Store) Root() string { return s.root }
+
+// --- Session lifecycle (spec: Session lifecycle) ---
+
+// CreateSession opens a new investigation for the given bug description and cwd.
+// The ID is a fresh random base36 token (D4). If another open session already
+// exists for the same cwd it is returned so the caller can warn the user; the new
+// session is still created (concurrent sessions are allowed, D-risks).
+func (s *Store) CreateSession(description, cwd string) (created *Session, existingSameCWD *Session, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing := s.findOpenByCWDLocked(cwd); existing != nil {
+		existingSameCWD = cloneSession(existing.session)
+	}
+
+	id, err := s.uniqueIDLocked()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sess := &Session{
+		ID:          id,
+		Description: description,
+		CWD:         cwd,
+		CreatedAt:   time.Now().UTC(),
+		Hypotheses:  []Hypothesis{},
+		Probes:      []Probe{},
+		Runs:        []Run{},
+	}
+	entry := &sessionEntry{session: sess, floods: map[floodKey]*floodBuffer{}}
+	s.sessions[id] = entry
+
+	if err := s.writeState(sess); err != nil {
+		delete(s.sessions, id)
+		return nil, nil, err
+	}
+	return cloneSession(sess), existingSameCWD, nil
+}
+
+// CloseSession transitions a session to closed and reports every probe still
+// awaiting cleanup, i.e. with Removed unset (D10). Closing an already-closed
+// session is idempotent.
+func (s *Store) CloseSession(id string) (unremoved []Probe, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[id]
+	if !ok {
+		return nil, fmt.Errorf("close session %q: %w", id, ErrSessionNotFound)
+	}
+
+	if entry.session.ClosedAt == nil {
+		now := time.Now().UTC()
+		entry.session.ClosedAt = &now
+		if err := s.writeState(entry.session); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, p := range entry.session.Probes {
+		if !p.Removed {
+			unremoved = append(unremoved, p)
+		}
+	}
+	return unremoved, nil
+}
+
+// GetSession returns a copy of a session's full state, or ErrSessionNotFound.
+func (s *Store) GetSession(id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[id]
+	if !ok {
+		return nil, fmt.Errorf("get session %q: %w", id, ErrSessionNotFound)
+	}
+	return cloneSession(entry.session), nil
+}
+
+// ResumeLatest returns the most recently created open session for debug_resume
+// with no argument (spec: Investigation resume). ErrNoOpenSession when none.
+func (s *Store) ResumeLatest() (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var latest *Session
+	for _, entry := range s.sessions {
+		sess := entry.session
+		if sess.ClosedAt != nil {
+			continue
+		}
+		if latest == nil || sess.CreatedAt.After(latest.CreatedAt) {
+			latest = sess
+		}
+	}
+	if latest == nil {
+		return nil, ErrNoOpenSession
+	}
+	return cloneSession(latest), nil
+}
+
+// --- Hypothesis board (spec: Hypothesis board persisted in daemon) ---
+
+// SetHypotheses replaces the session's board with the given statements, assigning
+// sequential IDs (h1, h2, ...) and status active. This backs set_hypotheses (D9).
+func (s *Store) SetHypotheses(sessionID string, statements []string) ([]Hypothesis, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, fmt.Errorf("set hypotheses for %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	now := time.Now().UTC()
+	board := make([]Hypothesis, 0, len(statements))
+	for i, stmt := range statements {
+		board = append(board, Hypothesis{
+			ID:        "h" + strconv.Itoa(i+1),
+			Statement: stmt,
+			Status:    HypothesisActive,
+			CreatedAt: now,
+			UpdatedAt: now,
+		})
+	}
+	entry.session.Hypotheses = board
+
+	if err := s.writeState(entry.session); err != nil {
+		return nil, err
+	}
+	return cloneHypotheses(board), nil
+}
+
+// UpdateHypothesis sets a hypothesis's status and evidence note (D6). The note
+// records why a suspect was killed or confirmed.
+func (s *Store) UpdateHypothesis(sessionID, hypothesisID string, status HypothesisStatus, note string) (Hypothesis, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return Hypothesis{}, fmt.Errorf("update hypothesis in %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	for i := range entry.session.Hypotheses {
+		h := &entry.session.Hypotheses[i]
+		if h.ID != hypothesisID {
+			continue
+		}
+		h.Status = status
+		if note != "" {
+			h.Note = note
+		}
+		h.UpdatedAt = time.Now().UTC()
+		if err := s.writeState(entry.session); err != nil {
+			return Hypothesis{}, err
+		}
+		return *h, nil
+	}
+	return Hypothesis{}, fmt.Errorf("update hypothesis %q in %q: %w", hypothesisID, sessionID, ErrHypothesisNotFound)
+}
+
+// ErrHypothesisNotFound is returned when a hypothesis ID is unknown in a session.
+var ErrHypothesisNotFound = errors.New("hypothesis not found")
+
+// --- Probe registry (spec: Probe registry) ---
+
+// RegisterProbe records a placed probe so cleanup is guaranteed findable (D10).
+// Re-registering an existing probe ID updates it in place.
+func (s *Store) RegisterProbe(sessionID string, p Probe) (Probe, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return Probe{}, fmt.Errorf("register probe in %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now().UTC()
+	}
+	for i := range entry.session.Probes {
+		if entry.session.Probes[i].ID == p.ID {
+			entry.session.Probes[i] = p
+			if err := s.writeState(entry.session); err != nil {
+				return Probe{}, err
+			}
+			return p, nil
+		}
+	}
+	entry.session.Probes = append(entry.session.Probes, p)
+	if err := s.writeState(entry.session); err != nil {
+		return Probe{}, err
+	}
+	return p, nil
+}
+
+// RemoveProbe marks a probe removed once its line is deleted from code (D10).
+func (s *Store) RemoveProbe(sessionID, probeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("remove probe in %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	for i := range entry.session.Probes {
+		if entry.session.Probes[i].ID == probeID {
+			entry.session.Probes[i].Removed = true
+			return s.writeState(entry.session)
+		}
+	}
+	return fmt.Errorf("remove probe %q in %q: %w", probeID, sessionID, ErrProbeNotFound)
+}
+
+// ErrProbeNotFound is returned when a probe ID is unknown in a session.
+var ErrProbeNotFound = errors.New("probe not found")
+
+// StaleProbe is an unremoved probe across any session, for `sherlog probes --stale` (D10).
+type StaleProbe struct {
+	SessionID string `json:"session_id"`
+	Probe     Probe  `json:"probe"`
+}
+
+// StaleProbes lists every registered-but-not-removed probe across all sessions,
+// the "weeks later" safety net for orphaned probes (D10). Results are sorted by
+// session ID then probe ID for stable output.
+func (s *Store) StaleProbes() []StaleProbe {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var out []StaleProbe
+	for id, entry := range s.sessions {
+		for _, p := range entry.session.Probes {
+			if !p.Removed {
+				out = append(out, StaleProbe{SessionID: id, Probe: p})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SessionID != out[j].SessionID {
+			return out[i].SessionID < out[j].SessionID
+		}
+		return out[i].Probe.ID < out[j].Probe.ID
+	})
+	return out
+}
+
+// --- Runs (D7) ---
+
+// OpenRun starts a new run on a session and returns its ID. await_run opens a run
+// before the user reproduces the bug; every log event is stamped with it (D7).
+func (s *Store) OpenRun(sessionID string) (Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return Run{}, fmt.Errorf("open run in %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	entry.nextRun++
+	run := Run{ID: "r" + strconv.Itoa(entry.nextRun), StartedAt: time.Now().UTC()}
+	entry.session.Runs = append(entry.session.Runs, run)
+	if err := s.writeState(entry.session); err != nil {
+		return Run{}, err
+	}
+	return run, nil
+}
+
+// CloseRun records the user's verdict on a run (D7).
+func (s *Store) CloseRun(sessionID, runID string, verdict RunVerdict) (Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return Run{}, fmt.Errorf("close run in %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	for i := range entry.session.Runs {
+		r := &entry.session.Runs[i]
+		if r.ID != runID {
+			continue
+		}
+		if r.ClosedAt == nil {
+			now := time.Now().UTC()
+			r.ClosedAt = &now
+		}
+		r.Verdict = verdict
+		if err := s.writeState(entry.session); err != nil {
+			return Run{}, err
+		}
+		return *r, nil
+	}
+	return Run{}, fmt.Errorf("close run %q in %q: %w", runID, sessionID, ErrRunNotFound)
+}
+
+// LatestOpenRun returns the most recently opened run with no verdict, or false.
+// await_run re-attaches to it so re-invocation is idempotent (D8).
+func (s *Store) LatestOpenRun(sessionID string) (Run, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return Run{}, false, fmt.Errorf("latest open run in %q: %w", sessionID, ErrSessionNotFound)
+	}
+	for i := len(entry.session.Runs) - 1; i >= 0; i-- {
+		if entry.session.Runs[i].ClosedAt == nil {
+			return entry.session.Runs[i], true, nil
+		}
+	}
+	return Run{}, false, nil
+}
+
+// --- Ingest & query ---
+
+// Ingest records a probe hit. The owning run, when empty, defaults to the
+// session's latest open run so events fired during await_run are attributed
+// correctly (D7). Unknown sessions are rejected with ErrSessionNotFound so the
+// HTTP handler can drop drive-by POSTs silently (D4).
+func (s *Store) Ingest(sessionID, probeID string, body any, raw string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("ingest for %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	run := ""
+	for i := len(entry.session.Runs) - 1; i >= 0; i-- {
+		if entry.session.Runs[i].ClosedAt == nil {
+			run = entry.session.Runs[i].ID
+			break
+		}
+	}
+
+	ev := LogEvent{TS: time.Now().UTC(), Run: run, Probe: probeID, Body: body, Raw: raw}
+	if err := s.appendLog(sessionID, ev); err != nil {
+		return err
+	}
+	entry.recordEvent(ev, s.floodN)
+	return nil
+}
+
+// ProbeSummary is the per-probe view of a run: the true total plus the retained
+// first/last-N events and whether the middle was dropped (D8).
+type ProbeSummary struct {
+	Probe     string     `json:"probe"`
+	Run       string     `json:"run"`
+	Total     int        `json:"total"`
+	Truncated bool       `json:"truncated"`
+	Events    []LogEvent `json:"events"`
+}
+
+// RunSummary returns one ProbeSummary per probe that fired in the run, sorted by
+// probe ID. This is the shape await_run reports to the skill (D8): counts and
+// first/last samples, never raw dumps.
+func (s *Store) RunSummary(sessionID, runID string) ([]ProbeSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, fmt.Errorf("run summary for %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	var out []ProbeSummary
+	for key, buf := range entry.floods {
+		if key.run != runID {
+			continue
+		}
+		out = append(out, ProbeSummary{
+			Probe:     key.probe,
+			Run:       key.run,
+			Total:     buf.total,
+			Truncated: buf.truncated(),
+			Events:    buf.events(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Probe < out[j].Probe })
+	return out, nil
+}
+
+// QueryFilter narrows query_logs results (D9). A zero-value field means "any".
+type QueryFilter struct {
+	Run   string // limit to one run
+	Probe string // limit to one probe
+	Limit int    // cap returned events (0 = no cap)
+}
+
+// QueryResult is one matching (run, probe) bucket with its true total and the
+// retained events, capped by the filter limit (D8: truncation always disclosed).
+type QueryResult struct {
+	Probe     string     `json:"probe"`
+	Run       string     `json:"run"`
+	Total     int        `json:"total"`
+	Truncated bool       `json:"truncated"`
+	Events    []LogEvent `json:"events"`
+}
+
+// QueryLogs returns retained events matching the filter, grouped by (run, probe)
+// and sorted by run then probe. Total reflects the true ingested count even when
+// events were dropped by flood control or the filter limit (D8, D9).
+func (s *Store) QueryLogs(sessionID string, f QueryFilter) ([]QueryResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, fmt.Errorf("query logs for %q: %w", sessionID, ErrSessionNotFound)
+	}
+
+	var out []QueryResult
+	for key, buf := range entry.floods {
+		if f.Run != "" && key.run != f.Run {
+			continue
+		}
+		if f.Probe != "" && key.probe != f.Probe {
+			continue
+		}
+		events := buf.events()
+		truncated := buf.truncated()
+		if f.Limit > 0 && len(events) > f.Limit {
+			events = events[:f.Limit]
+			truncated = true
+		}
+		out = append(out, QueryResult{
+			Probe:     key.probe,
+			Run:       key.run,
+			Total:     buf.total,
+			Truncated: truncated,
+			Events:    events,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Run != out[j].Run {
+			return out[i].Run < out[j].Run
+		}
+		return out[i].Probe < out[j].Probe
+	})
+	return out, nil
+}
+
+// --- internal helpers (callers hold s.mu) ---
+
+func (s *Store) findOpenByCWDLocked(cwd string) *sessionEntry {
+	for _, entry := range s.sessions {
+		if entry.session.ClosedAt == nil && entry.session.CWD == cwd {
+			return entry
+		}
+	}
+	return nil
+}
+
+// uniqueIDLocked generates a random ID not already in use. Collisions are
+// astronomically unlikely with 36^8 space but the retry keeps correctness exact.
+func (s *Store) uniqueIDLocked() (string, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		id, err := newID()
+		if err != nil {
+			return "", err
+		}
+		if _, exists := s.sessions[id]; !exists {
+			return id, nil
+		}
+	}
+	return "", errors.New("generate unique session id: too many collisions")
+}
+
+func maxRunNumber(runs []Run) int {
+	max := 0
+	for _, r := range runs {
+		// Run IDs are "r" + number; ignore anything that does not parse.
+		if len(r.ID) > 1 && r.ID[0] == 'r' {
+			if n, err := strconv.Atoi(r.ID[1:]); err == nil && n > max {
+				max = n
+			}
+		}
+	}
+	return max
+}
+
+// --- defensive copies: never hand out pointers into the live store ---
+
+func cloneSession(in *Session) *Session {
+	out := *in
+	if in.ClosedAt != nil {
+		t := *in.ClosedAt
+		out.ClosedAt = &t
+	}
+	out.Hypotheses = cloneHypotheses(in.Hypotheses)
+	out.Probes = append([]Probe(nil), in.Probes...)
+	out.Runs = cloneRuns(in.Runs)
+	return &out
+}
+
+func cloneHypotheses(in []Hypothesis) []Hypothesis {
+	if in == nil {
+		return nil
+	}
+	return append([]Hypothesis(nil), in...)
+}
+
+func cloneRuns(in []Run) []Run {
+	if in == nil {
+		return nil
+	}
+	out := make([]Run, len(in))
+	for i, r := range in {
+		out[i] = r
+		if r.ClosedAt != nil {
+			t := *r.ClosedAt
+			out[i].ClosedAt = &t
+		}
+	}
+	return out
+}
