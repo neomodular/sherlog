@@ -762,6 +762,89 @@ func TestAdoptSurvivesRestart(t *testing.T) {
 	}
 }
 
+// TestAdoptThenDirectSurvivesRestart is the regression for the two-pass replay
+// merge bug: a run that has BOTH adopted orphans and a direct post-open event must
+// replay to the same attribution as the live view. Replay loads the direct event
+// into the run's buffer first (pass 1), then applies the adoption marker (pass 2);
+// without merging, the marker overwrote the buffer and discarded the direct event,
+// so replay undercounted the run (live total 3 vs replay total 2). This asserts
+// live and replayed RunSummary (Total, Adopted, Truncated) and RunTotal match
+// exactly per probe.
+func TestAdoptThenDirectSurvivesRestart(t *testing.T) {
+	root := t.TempDir()
+	s1, err := New(WithRoot(root))
+	if err != nil {
+		t.Fatalf("New s1: %v", err)
+	}
+	sess, _, _ := s1.CreateSession("adopt then direct", "/repo")
+
+	// Two orphans fire before the run opens (they will be adopted into it).
+	fired := sess.CreatedAt.Add(2 * time.Millisecond)
+	injectOrphan(t, s1, sess.ID, "p1", fired, map[string]any{"i": float64(1)})
+	injectOrphan(t, s1, sess.ID, "p1", fired, map[string]any{"i": float64(2)})
+
+	time.Sleep(5 * time.Millisecond)
+	run, err := s1.OpenRun(sess.ID)
+	if err != nil {
+		t.Fatalf("OpenRun: %v", err)
+	}
+	// A direct event ingested into the now-open run lands in the SAME (run, probe)
+	// buffer that adoption populated — the collision the merge must handle.
+	if err := s1.Ingest(sess.ID, "p1", map[string]any{"i": float64(3)}, ""); err != nil {
+		t.Fatalf("Ingest direct: %v", err)
+	}
+
+	live, err := s1.RunSummary(sess.ID, run.ID)
+	if err != nil {
+		t.Fatalf("live RunSummary: %v", err)
+	}
+	livePS, ok := probeInSummary(live, "p1")
+	if !ok {
+		t.Fatalf("p1 missing from live summary: %+v", live)
+	}
+	if livePS.Total != 3 || livePS.Adopted != 2 {
+		t.Fatalf("live attribution wrong: want total=3 adopted=2, got %+v", livePS)
+	}
+	liveTotal, err := s1.RunTotal(sess.ID, run.ID)
+	if err != nil {
+		t.Fatalf("live RunTotal: %v", err)
+	}
+
+	// Restart: fresh Store over the same root, replaying logs.jsonl.
+	s2, err := New(WithRoot(root))
+	if err != nil {
+		t.Fatalf("New s2 (restart): %v", err)
+	}
+	replay, err := s2.RunSummary(sess.ID, run.ID)
+	if err != nil {
+		t.Fatalf("replay RunSummary: %v", err)
+	}
+	replayPS, ok := probeInSummary(replay, "p1")
+	if !ok {
+		t.Fatalf("p1 missing from replay summary: %+v", replay)
+	}
+	if replayPS.Total != livePS.Total {
+		t.Errorf("replay Total=%d != live Total=%d (direct event discarded by overwrite)", replayPS.Total, livePS.Total)
+	}
+	if replayPS.Adopted != livePS.Adopted {
+		t.Errorf("replay Adopted=%d != live Adopted=%d", replayPS.Adopted, livePS.Adopted)
+	}
+	if replayPS.Truncated != livePS.Truncated {
+		t.Errorf("replay Truncated=%v != live Truncated=%v", replayPS.Truncated, livePS.Truncated)
+	}
+	replayTotal, err := s2.RunTotal(sess.ID, run.ID)
+	if err != nil {
+		t.Fatalf("replay RunTotal: %v", err)
+	}
+	if replayTotal != liveTotal {
+		t.Errorf("replay RunTotal=%d != live RunTotal=%d", replayTotal, liveTotal)
+	}
+	// No orphan residue survives replay: every orphan was adopted.
+	if n := orphanTotal(s2, sess.ID); n != 0 {
+		t.Errorf("orphan residue after replay: %d events", n)
+	}
+}
+
 // TestAdoptTruncatedSplitMinimum verifies that when flood truncation straddles the
 // adoption boundary, the adopted total is reported as a disclosed minimum.
 func TestAdoptTruncatedSplitMinimum(t *testing.T) {

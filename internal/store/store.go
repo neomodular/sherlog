@@ -87,9 +87,12 @@ func (e *sessionEntry) hasAdoptableOrphans(from, to time.Time) bool {
 // implementation shared by live open and replay (DRY) so attribution is identical
 // either way. Returns true when at least one event was adopted.
 //
-// A new run owns no buffers at open — adoption happens exactly at open precisely
-// so the destination floodKey is always absent — so the moved buffer is installed
-// directly under the new run's key.
+// On a live open the destination floodKey is always absent (a new run owns no
+// buffers yet), so the moved buffer is installed directly. Replay is two-pass: its
+// first pass may have already loaded direct post-open events under the run's key,
+// so when that destination exists the moved orphans are MERGED into it rather than
+// overwriting it (design D3) — otherwise replay would discard those direct events
+// and undercount the run versus the live view.
 func (e *sessionEntry) adoptOrphans(run string, from, to time.Time) bool {
 	inWindow := func(ts time.Time) bool { return ts.After(from) && !ts.After(to) }
 
@@ -104,7 +107,12 @@ func (e *sessionEntry) adoptOrphans(run string, from, to time.Time) bool {
 		}
 		adoptedAny = true
 
-		e.floods[floodKey{run: run, probe: key.probe}] = moved
+		dstKey := floodKey{run: run, probe: key.probe}
+		if dst := e.floods[dstKey]; dst != nil {
+			dst.mergeFrom(moved)
+		} else {
+			e.floods[dstKey] = moved
+		}
 		// An orphan buffer drained to empty leaves no per-run residue to query.
 		if buf.total == 0 {
 			delete(e.floods, key)
@@ -491,17 +499,11 @@ func (s *Store) openNewRunLocked(entry *sessionEntry) (Run, error) {
 	from := adoptionLowerBound(entry.session, run.ID, now)
 	if entry.hasAdoptableOrphans(from, now) {
 		if err := s.appendAdoptMarker(entry, adoptMarker{Run: run.ID, From: from, To: now}); err != nil {
-			// Roll back the run too: the open did not complete durably, and the
-			// caller will retry. nextRun is intentionally left advanced so the retry
-			// gets a fresh ID for the in-memory lifetime — unlike the writeState path
-			// above, which rewinds it because that failure happens before any marker
-			// write. Reusing the ID is safe here regardless: the marker write failed,
-			// so nothing durable or cross-referenced ever named it, and a restart
-			// rebuilds nextRun from the persisted runs (maxRunNumber) anyway.
+			// Marker write failed before any in-memory adoption: roll back the run so
+			// the aborted open leaves memory and disk in agreement (D2 atomicity).
 			entry.session.Runs = entry.session.Runs[:len(entry.session.Runs)-1]
-			// Re-persist the rolled-back state. If this also fails, disk still holds
-			// the phantom run while memory dropped it, so a restart would resurrect
-			// an empty run; join the error so that window is disclosed, never silent.
+			// Re-persist; if that also fails, disk still holds the phantom run, so
+			// join the errors to disclose the inconsistency rather than hide it.
 			if rbErr := s.writeState(entry.session); rbErr != nil {
 				return Run{}, errors.Join(err, fmt.Errorf("roll back run state after marker failure: %w", rbErr))
 			}
@@ -641,13 +643,12 @@ func (s *Store) Ingest(sessionID, probeID string, body any, raw string) error {
 	ev := LogEvent{TS: time.Now().UTC(), Run: run, Probe: probeID, Body: body, Raw: raw}
 	entry.recordEvent(ev, s.floodN)
 
-	// Acquire appendMu BEFORE releasing s.mu so the order in which events (and
-	// adoption markers, which also take appendMu under s.mu) acquire the file lock
-	// matches the order in which they were recorded in memory under s.mu. This is
-	// what makes an adopted orphan's line strictly precede its run's marker on
-	// disk: a concurrent OpenRun, even after seeing this event in memory, cannot
-	// take appendMu for its marker until this line is durable. The syscall itself
-	// still runs after s.mu is released, so the global lock never spans a write.
+	// Two-pass replay (replayLogs loads all events before applying any marker) is
+	// the primary guarantee that an adopted orphan survives restart regardless of
+	// on-disk interleaving. Acquiring appendMu BEFORE releasing s.mu is
+	// defense-in-depth: it pins on-disk append order to in-memory record order, so
+	// an adopted orphan's line still precedes its run's marker on disk. The syscall
+	// runs after s.mu is released, so the global lock never spans a write.
 	entry.appendMu.Lock()
 	s.mu.Unlock()
 	defer entry.appendMu.Unlock()

@@ -1,6 +1,9 @@
 package store
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // DefaultFloodN is the default first/last-N retained per probe per run (D8).
 const DefaultFloodN = 20
@@ -145,4 +148,33 @@ func (b *floodBuffer) splitAdopt(run string, after func(time.Time) bool) *floodB
 		b.forceTruncated = true
 	}
 	return adopted
+}
+
+// mergeFrom folds src into b, summing exact totals and adopted counts and OR-ing
+// truncation, then rebuilds b's first/last windows from the chronological union
+// of both sides' retained events (design D3 merge). It is what makes replay match
+// live attribution: replay's first pass loads direct post-open events into the
+// run's buffer, then the marker pass adopts orphans into the same key, and this
+// merge combines them instead of overwriting (the bug fix). Because rebuilding
+// from retained subsets cannot reconstruct either side's dropped middle, the
+// summed counter b.total stays authoritative and truncation is forced whenever
+// that counter exceeds what the rebuilt windows can retain, so the true volume is
+// never understated.
+func (b *floodBuffer) mergeFrom(src *floodBuffer) {
+	combinedTotal := b.total + src.total
+	combinedAdopted := b.adopted + src.adopted
+	// Truncation is lost if any side dropped a middle, or if the union of retained
+	// events cannot itself be held whole — preserve disclosure across the merge.
+	forced := b.forceTruncated || src.forceTruncated || b.truncated() || src.truncated()
+
+	union := append(b.events(), src.events()...)
+	sort.SliceStable(union, func(i, j int) bool { return union[i].TS.Before(union[j].TS) })
+
+	b.first, b.last, b.total, b.adopted, b.forceTruncated = nil, nil, 0, 0, false
+	for _, ev := range union {
+		b.add(ev)
+	}
+	b.total = combinedTotal
+	b.adopted = combinedAdopted
+	b.forceTruncated = forced || b.total > b.retained()
 }

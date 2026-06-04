@@ -20,7 +20,14 @@ import (
 // debounce tests run in well under a second.
 func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
-	st, err := store.New(store.WithRoot(t.TempDir()))
+	return newTestServerAt(t, t.TempDir())
+}
+
+// newTestServerAt builds a test Server over an explicit store root so restart
+// tests can stand up a fresh Server over the same on-disk state.
+func newTestServerAt(t *testing.T, root string) (*Server, *store.Store) {
+	t.Helper()
+	st, err := store.New(store.WithRoot(root))
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
@@ -295,6 +302,57 @@ func TestAwaitAdoptsPreRunEvents(t *testing.T) {
 	}
 	if ps.Adopted != 3 {
 		t.Errorf("Adopted = %d, want 3", ps.Adopted)
+	}
+}
+
+// TestAwaitAdoptsThenRestartReplaysSame mirrors the store-level two-pass replay
+// regression at the daemon level: drive the await-adopts-pre-run-events flow
+// (orphans ingested via the public endpoint, then a direct post-open event), then
+// restart by standing up a fresh Server over the same root. The replayed run
+// summary must match the live await result exactly, proving adoption markers merge
+// with the direct events replay loaded first rather than overwriting them.
+func TestAwaitAdoptsThenRestartReplaysSame(t *testing.T) {
+	root := t.TempDir()
+	srv, st := newTestServerAt(t, root)
+	sess, _, err := st.CreateSession("restart adopt", "/tmp/app")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Orphans land before await_run opens a run (adopted at open).
+	for i := 0; i < 3; i++ {
+		do(srv, http.MethodPost, "/log/"+sess.ID+"/p1", `{"i":1}`)
+	}
+	// A direct post-open event nudges the wait to quiet and shares the run's buffer.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		do(srv, http.MethodPost, "/log/"+sess.ID+"/p1", `{"i":2}`)
+	}()
+
+	res := awaitCall(t, srv, sess.ID, 5)
+	if len(res.Summary) != 1 || res.Summary[0].Probe != "p1" {
+		t.Fatalf("expected p1 summary, got %+v", res.Summary)
+	}
+	live := res.Summary[0]
+	if live.Total != 4 || live.Adopted != 3 {
+		t.Fatalf("live attribution wrong: want total=4 adopted=3, got %+v", live)
+	}
+
+	// Restart: a fresh store over the same root replays logs.jsonl.
+	st2, err := store.New(store.WithRoot(root))
+	if err != nil {
+		t.Fatalf("store.New (restart): %v", err)
+	}
+	replay, err := st2.RunSummary(sess.ID, res.Run.ID)
+	if err != nil {
+		t.Fatalf("RunSummary after restart: %v", err)
+	}
+	if len(replay) != 1 || replay[0].Probe != "p1" {
+		t.Fatalf("replay summary missing p1: %+v", replay)
+	}
+	rp := replay[0]
+	if rp.Total != live.Total || rp.Adopted != live.Adopted || rp.Truncated != live.Truncated {
+		t.Errorf("replay attribution diverged: live=%+v replay=%+v", live, rp)
 	}
 }
 

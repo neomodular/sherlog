@@ -111,14 +111,10 @@ func (s *Store) appendLog(sessionID string, ev LogEvent) error {
 }
 
 // appendAdoptMarker appends one adoption marker line to the session's logs.jsonl
-// (design D2). It takes entry.appendMu so the marker serializes with event
-// appends on the same per-session lock, guaranteeing every adopted event's line
-// is already durable before the marker line: Ingest acquires appendMu while still
-// holding s.mu, so any orphan recorded in memory before this run opened has also
-// already acquired (or holds) appendMu, and this marker waits behind it. Without
-// that ordering, a marker flushed ahead of a still-pending event line would, on
-// restart, apply before the event loads and leave it an orphan (the fast-repro
-// vs. await race this change targets). Callers hold s.mu.
+// (design D2). It takes entry.appendMu so the marker serializes with event appends
+// on the same per-session lock; two-pass replay (replayLogs) is the primary
+// guarantee that adoption survives restart, and this ordering is defense-in-depth.
+// Callers hold s.mu.
 func (s *Store) appendAdoptMarker(entry *sessionEntry, m adoptMarker) error {
 	sessionID := entry.session.ID
 	dir := s.sessionDir(sessionID)
