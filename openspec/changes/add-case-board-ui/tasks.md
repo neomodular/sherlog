@@ -2,11 +2,11 @@
 
 ## 1. Store: resolutions, recall, diff
 
-- [ ] 1.1 Add `Resolution` to Session (root cause, fix summary, confirmed hypothesis id, closed-at); persist in state.json; nil-safe load of old files; close-with-resolution store API
-- [ ] 1.2 Implement keyword recall: tokenize/stopword-strip, TF overlap scoring over closed sessions (description + root cause + confirmed hypothesis), top-3 with min threshold
-- [ ] 1.3 Implement run diff in store: per-probe fired/counts/first-last samples for two runs, divergence flag (one-sided or ≥10× count ratio), truncation disclosure, same-session validation
-- [ ] 1.4 In-process pub/sub on the store (log/board/run/probe events) with non-blocking subscriber drop
-- [ ] 1.5 Unit tests: resolution persistence + old-state compat, recall scoring/threshold/empty, diff correctness + invalid pairs, pub/sub under concurrent publish
+- [x] 1.1 Add `Resolution` to Session (root cause, fix summary, confirmed hypothesis id, closed-at); persist in state.json; nil-safe load of old files; close-with-resolution store API
+- [x] 1.2 Implement keyword recall: tokenize/stopword-strip, TF overlap scoring over closed sessions (description + root cause + confirmed hypothesis), top-3 with min threshold
+- [x] 1.3 Implement run diff in store: per-probe fired/counts/first-last samples for two runs, divergence flag (one-sided or ≥10× count ratio), truncation disclosure, same-session validation
+- [x] 1.4 In-process pub/sub on the store (log/board/run/probe events) with non-blocking subscriber drop
+- [x] 1.5 Unit tests: resolution persistence + old-state compat, recall scoring/threshold/empty, diff correctness + invalid pairs, pub/sub under concurrent publish
 
 ## 2. Daemon: new endpoints + SSE
 

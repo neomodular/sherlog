@@ -131,6 +131,12 @@ type Store struct {
 
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
+
+	// subMu guards the subscriber set independently of mu (design D3): publish
+	// must never run under mu, so event fan-out cannot serialize against ingest or
+	// state writes, and a draining subscriber cannot deadlock a publisher.
+	subMu sync.Mutex
+	subs  map[*subscription]struct{}
 }
 
 // Option configures a Store.
@@ -220,30 +226,60 @@ func (s *Store) CreateSession(description, cwd string) (created *Session, existi
 	return cloneSession(sess), existingSameCWD, nil
 }
 
-// CloseSession transitions a session to closed and reports every probe still
-// awaiting cleanup, i.e. with Removed unset (D10). Closing an already-closed
-// session is idempotent.
+// CloseSession transitions a session to closed-unsolved and reports every probe
+// still awaiting cleanup, i.e. with Removed unset (D10). Closing an already-closed
+// session is idempotent. Use CloseSessionWithResolution to record a root cause.
 func (s *Store) CloseSession(id string) (unremoved []Probe, err error) {
+	return s.CloseSessionWithResolution(id, nil)
+}
+
+// CloseSessionWithResolution transitions a session to closed, optionally recording
+// the resolution that feeds the closed-case view and recall (D4). A nil or empty
+// resolution closes the case unsolved (Resolution stays nil), so a case is never
+// recorded as solved with nothing to show. The resolution's ClosedAt is stamped
+// here so it always matches the session close time. Closing an already-closed
+// session is idempotent and leaves any existing resolution untouched. Returns
+// every probe still awaiting cleanup (Removed unset, D10).
+func (s *Store) CloseSessionWithResolution(id string, res *Resolution) (unremoved []Probe, err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, ok := s.sessions[id]
 	if !ok {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("close session %q: %w", id, ErrSessionNotFound)
 	}
 
+	newlyClosed := false
 	if entry.session.ClosedAt == nil {
 		now := time.Now().UTC()
 		entry.session.ClosedAt = &now
+		// An all-empty resolution is an unsolved close: keep Resolution nil so recall
+		// never matches a case that recorded no root cause (session-state spec).
+		if res != nil && !res.IsEmpty() {
+			r := *res
+			r.ClosedAt = now
+			entry.session.Resolution = &r
+		}
 		if err := s.writeState(entry.session); err != nil {
+			s.mu.Unlock()
 			return nil, err
 		}
+		newlyClosed = true
 	}
 
 	for _, p := range entry.session.Probes {
 		if !p.Removed {
 			unremoved = append(unremoved, p)
 		}
+	}
+	closed := cloneSession(entry.session)
+	s.mu.Unlock()
+
+	// Publish off-lock (design D3): the run channel signals the case left the open
+	// set so a Case Board can refresh. Only emit on the transition, not on the
+	// idempotent re-close.
+	if newlyClosed {
+		s.publish(Event{Kind: EventRun, Session: id, Payload: closed})
 	}
 	return unremoved, nil
 }
@@ -288,10 +324,10 @@ func (s *Store) ResumeLatest() (*Session, error) {
 // sequential IDs (h1, h2, ...) and status active. This backs set_hypotheses (D9).
 func (s *Store) SetHypotheses(sessionID string, statements []string) ([]Hypothesis, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, ok := s.sessions[sessionID]
 	if !ok {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("set hypotheses for %q: %w", sessionID, ErrSessionNotFound)
 	}
 
@@ -309,19 +345,24 @@ func (s *Store) SetHypotheses(sessionID string, statements []string) ([]Hypothes
 	entry.session.Hypotheses = board
 
 	if err := s.writeState(entry.session); err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
-	return cloneHypotheses(board), nil
+	out := cloneHypotheses(board)
+	s.mu.Unlock()
+
+	s.publish(Event{Kind: EventBoard, Session: sessionID, Payload: out})
+	return out, nil
 }
 
 // UpdateHypothesis sets a hypothesis's status and evidence note (D6). The note
 // records why a suspect was killed or confirmed.
 func (s *Store) UpdateHypothesis(sessionID, hypothesisID string, status HypothesisStatus, note string) (Hypothesis, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, ok := s.sessions[sessionID]
 	if !ok {
+		s.mu.Unlock()
 		return Hypothesis{}, fmt.Errorf("update hypothesis in %q: %w", sessionID, ErrSessionNotFound)
 	}
 
@@ -336,10 +377,16 @@ func (s *Store) UpdateHypothesis(sessionID, hypothesisID string, status Hypothes
 		}
 		h.UpdatedAt = time.Now().UTC()
 		if err := s.writeState(entry.session); err != nil {
+			s.mu.Unlock()
 			return Hypothesis{}, err
 		}
-		return *h, nil
+		updated := *h
+		s.mu.Unlock()
+
+		s.publish(Event{Kind: EventBoard, Session: sessionID, Payload: updated})
+		return updated, nil
 	}
+	s.mu.Unlock()
 	return Hypothesis{}, fmt.Errorf("update hypothesis %q in %q: %w", hypothesisID, sessionID, ErrHypothesisNotFound)
 }
 
@@ -352,48 +399,62 @@ var ErrHypothesisNotFound = errors.New("hypothesis not found")
 // Re-registering an existing probe ID updates it in place.
 func (s *Store) RegisterProbe(sessionID string, p Probe) (Probe, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, ok := s.sessions[sessionID]
 	if !ok {
+		s.mu.Unlock()
 		return Probe{}, fmt.Errorf("register probe in %q: %w", sessionID, ErrSessionNotFound)
 	}
 
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = time.Now().UTC()
 	}
+	replaced := false
 	for i := range entry.session.Probes {
 		if entry.session.Probes[i].ID == p.ID {
 			entry.session.Probes[i] = p
-			if err := s.writeState(entry.session); err != nil {
-				return Probe{}, err
-			}
-			return p, nil
+			replaced = true
+			break
 		}
 	}
-	entry.session.Probes = append(entry.session.Probes, p)
+	if !replaced {
+		entry.session.Probes = append(entry.session.Probes, p)
+	}
 	if err := s.writeState(entry.session); err != nil {
+		s.mu.Unlock()
 		return Probe{}, err
 	}
+	s.mu.Unlock()
+
+	s.publish(Event{Kind: EventProbe, Session: sessionID, Payload: p})
 	return p, nil
 }
 
 // RemoveProbe marks a probe removed once its line is deleted from code (D10).
 func (s *Store) RemoveProbe(sessionID, probeID string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, ok := s.sessions[sessionID]
 	if !ok {
+		s.mu.Unlock()
 		return fmt.Errorf("remove probe in %q: %w", sessionID, ErrSessionNotFound)
 	}
 
 	for i := range entry.session.Probes {
 		if entry.session.Probes[i].ID == probeID {
 			entry.session.Probes[i].Removed = true
-			return s.writeState(entry.session)
+			if err := s.writeState(entry.session); err != nil {
+				s.mu.Unlock()
+				return err
+			}
+			removed := entry.session.Probes[i]
+			s.mu.Unlock()
+
+			s.publish(Event{Kind: EventProbe, Session: sessionID, Payload: removed})
+			return nil
 		}
 	}
+	s.mu.Unlock()
 	return fmt.Errorf("remove probe %q in %q: %w", probeID, sessionID, ErrProbeNotFound)
 }
 
@@ -437,13 +498,20 @@ func (s *Store) StaleProbes() []StaleProbe {
 // Opening a new run adopts eligible pre-run orphan events into it (fix-prerun D1).
 func (s *Store) OpenRun(sessionID string) (Run, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, ok := s.sessions[sessionID]
 	if !ok {
+		s.mu.Unlock()
 		return Run{}, fmt.Errorf("open run in %q: %w", sessionID, ErrSessionNotFound)
 	}
-	return s.openNewRunLocked(entry)
+	run, err := s.openNewRunLocked(entry)
+	s.mu.Unlock()
+	if err != nil {
+		return Run{}, err
+	}
+
+	s.publish(Event{Kind: EventRun, Session: sessionID, Payload: run})
+	return run, nil
 }
 
 // OpenOrAttachRun returns the session's latest open run, or opens a new one if
@@ -452,21 +520,31 @@ func (s *Store) OpenRun(sessionID string) (Run, error) {
 // each opening its own (the LatestOpenRun+OpenRun pair was TOCTOU-racy, D8).
 func (s *Store) OpenOrAttachRun(sessionID string) (Run, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, ok := s.sessions[sessionID]
 	if !ok {
+		s.mu.Unlock()
 		return Run{}, fmt.Errorf("open-or-attach run in %q: %w", sessionID, ErrSessionNotFound)
 	}
 
 	for i := len(entry.session.Runs) - 1; i >= 0; i-- {
 		if entry.session.Runs[i].ClosedAt == nil {
 			// Re-attach to the open run: adoption happens only at open, never on
-			// re-attach (fix-prerun D1), so this path must not adopt.
-			return entry.session.Runs[i], nil
+			// re-attach (fix-prerun D1), so this path must not adopt — and nothing
+			// changed, so no run event is published.
+			run := entry.session.Runs[i]
+			s.mu.Unlock()
+			return run, nil
 		}
 	}
-	return s.openNewRunLocked(entry)
+	run, err := s.openNewRunLocked(entry)
+	s.mu.Unlock()
+	if err != nil {
+		return Run{}, err
+	}
+
+	s.publish(Event{Kind: EventRun, Session: sessionID, Payload: run})
+	return run, nil
 }
 
 // openNewRunLocked opens a fresh run, persists an append-only adoption marker for
@@ -541,10 +619,10 @@ func adoptionLowerBound(sess *Session, newRunID string, now time.Time) time.Time
 // CloseRun records the user's verdict on a run (D7).
 func (s *Store) CloseRun(sessionID, runID string, verdict RunVerdict) (Run, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, ok := s.sessions[sessionID]
 	if !ok {
+		s.mu.Unlock()
 		return Run{}, fmt.Errorf("close run in %q: %w", sessionID, ErrSessionNotFound)
 	}
 
@@ -559,10 +637,16 @@ func (s *Store) CloseRun(sessionID, runID string, verdict RunVerdict) (Run, erro
 		}
 		r.Verdict = verdict
 		if err := s.writeState(entry.session); err != nil {
+			s.mu.Unlock()
 			return Run{}, err
 		}
-		return *r, nil
+		closed := *r
+		s.mu.Unlock()
+
+		s.publish(Event{Kind: EventRun, Session: sessionID, Payload: closed})
+		return closed, nil
 	}
+	s.mu.Unlock()
 	return Run{}, fmt.Errorf("close run %q in %q: %w", runID, sessionID, ErrRunNotFound)
 }
 
@@ -591,10 +675,10 @@ func (s *Store) LatestOpenRun(sessionID string) (Run, bool, error) {
 // ErrNoOpenRun when no run awaits a verdict so the API can answer 409.
 func (s *Store) CloseLatestOpenRun(sessionID string, verdict RunVerdict) (Run, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, ok := s.sessions[sessionID]
 	if !ok {
+		s.mu.Unlock()
 		return Run{}, fmt.Errorf("close latest open run in %q: %w", sessionID, ErrSessionNotFound)
 	}
 
@@ -607,10 +691,16 @@ func (s *Store) CloseLatestOpenRun(sessionID string, verdict RunVerdict) (Run, e
 		r.ClosedAt = &now
 		r.Verdict = verdict
 		if err := s.writeState(entry.session); err != nil {
+			s.mu.Unlock()
 			return Run{}, err
 		}
-		return *r, nil
+		closed := *r
+		s.mu.Unlock()
+
+		s.publish(Event{Kind: EventRun, Session: sessionID, Payload: closed})
+		return closed, nil
 	}
+	s.mu.Unlock()
 	return Run{}, fmt.Errorf("close latest open run in %q: %w", sessionID, ErrNoOpenRun)
 }
 
@@ -651,10 +741,16 @@ func (s *Store) Ingest(sessionID, probeID string, body any, raw string) error {
 	// runs after s.mu is released, so the global lock never spans a write.
 	entry.appendMu.Lock()
 	s.mu.Unlock()
-	defer entry.appendMu.Unlock()
 	if err := s.appendLog(sessionID, ev); err != nil {
+		entry.appendMu.Unlock()
 		return err
 	}
+	entry.appendMu.Unlock()
+
+	// Publish after the durable append so a subscriber never sees a log event that
+	// failed to persist (design D3). publish takes subMu, not s.mu/appendMu, so the
+	// hot ingest path is never serialized by event fan-out.
+	s.publish(Event{Kind: EventLog, Session: sessionID, Payload: ev})
 	return nil
 }
 
@@ -884,6 +980,10 @@ func cloneSession(in *Session) *Session {
 	if in.ClosedAt != nil {
 		t := *in.ClosedAt
 		out.ClosedAt = &t
+	}
+	if in.Resolution != nil {
+		r := *in.Resolution
+		out.Resolution = &r
 	}
 	out.Hypotheses = cloneHypotheses(in.Hypotheses)
 	out.Probes = append([]Probe(nil), in.Probes...)

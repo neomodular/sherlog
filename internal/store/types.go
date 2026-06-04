@@ -43,6 +43,29 @@ type Session struct {
 	Hypotheses  []Hypothesis `json:"hypotheses"`
 	Probes      []Probe      `json:"probes"`
 	Runs        []Run        `json:"runs"`
+	// Resolution records why and how the case was closed (D4). nil means either
+	// still open or closed-unsolved; older state files predate the field and load
+	// with it nil (backward-compatible additive field, Migration Plan).
+	Resolution *Resolution `json:"resolution,omitempty"`
+}
+
+// Resolution is the outcome recorded when a case closes solved (D4): the root
+// cause, a human fix summary, the hypothesis confirmed as the culprit, and when
+// the case closed. It feeds the Case Board's closed-case view and case recall.
+// A closed-unsolved session has a nil Resolution and is excluded from recall's
+// root-cause matching.
+type Resolution struct {
+	RootCause             string    `json:"root_cause,omitempty"`
+	FixSummary            string    `json:"fix_summary,omitempty"`
+	ConfirmedHypothesisID string    `json:"confirmed_hypothesis_id,omitempty"`
+	ClosedAt              time.Time `json:"closed_at"`
+}
+
+// IsEmpty reports whether a resolution carries no substantive content — every
+// text field blank. CloseSessionWithResolution treats an all-empty resolution as
+// an unsolved close so a case is never recorded as solved with nothing to show.
+func (r Resolution) IsEmpty() bool {
+	return r.RootCause == "" && r.FixSummary == "" && r.ConfirmedHypothesisID == ""
 }
 
 // Hypothesis is a suspect on the board with its current status and the evidence
