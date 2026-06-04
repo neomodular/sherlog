@@ -1,0 +1,22 @@
+# Compiled binaries
+/sherlog
+/sherlog.exe
+/dist/
+*.exe
+*.test
+*.out
+
+# Go
+/vendor/
+go.work
+go.work.sum
+
+# Editor / OS artifacts
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Local runtime data (sherlog writes sessions under ~/.sherlog, but never commit a local copy)
+/.sherlog/

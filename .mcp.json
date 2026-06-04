@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sherlog": {
+      "command": "sherlog",
+      "args": ["mcp"]
+    }
+  }
+}

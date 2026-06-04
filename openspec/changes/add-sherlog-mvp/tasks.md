@@ -2,9 +2,9 @@
 
 ## 1. Project Scaffolding
 
-- [ ] 1.1 Initialize git repo + Go module (`go.mod`), directory layout: `cmd/sherlog/` (main with `daemon`/`mcp`/`probes`/`--version` subcommands), `internal/daemon/`, `internal/store/`, `internal/mcp/`, plugin dir (`.claude-plugin/`, `.mcp.json`, `skills/debug/`)
-- [ ] 1.2 Wire the official MCP Go SDK (`modelcontextprotocol/go-sdk`) per design D13
-- [ ] 1.3 Define core types in `internal/store/`: Session, Hypothesis, Probe, Run, LogEvent (per design D5–D7)
+- [x] 1.1 Initialize git repo + Go module (`go.mod`), directory layout: `cmd/sherlog/` (main with `daemon`/`mcp`/`probes`/`--version` subcommands), `internal/daemon/`, `internal/store/`, `internal/mcp/`, plugin dir (`.claude-plugin/`, `.mcp.json`, `skills/debug/`)
+- [x] 1.2 Wire the official MCP Go SDK (`modelcontextprotocol/go-sdk`) per design D13
+- [x] 1.3 Define core types in `internal/store/`: Session, Hypothesis, Probe, Run, LogEvent (per design D5–D7)
 
 ## 2. Store (session-state)
 
