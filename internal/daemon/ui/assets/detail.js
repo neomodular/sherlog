@@ -4,8 +4,42 @@
 // case detail + live evidence tail; design D7).
 
 import { api } from "./api.js";
-import { esc, badge, loc, fmtDate, fmtTime, eventBody, html, renderDescription } from "./render.js";
+import {
+  esc,
+  badge,
+  loc,
+  fmtDate,
+  fmtTime,
+  eventBody,
+  html,
+  renderDescription,
+  displayName,
+  cleanStatement,
+  hypothesisColor,
+  hypChip,
+} from "./render.js";
 import { caseHeader } from "./diff.js";
+
+// hypIndex maps every hypothesis id to its board position so display name, palette
+// color, and status are resolvable from any view (suspect cards, probes table,
+// verdict, evidence) without re-deriving them per call (polish-case-board D2). The
+// index drives the color so a hypothesis keeps the same color everywhere it appears.
+function hypIndex(hyps) {
+  const map = new Map();
+  (hyps || []).forEach((h, i) => map.set(h.id, { index: i, status: h.status }));
+  return map;
+}
+
+// chipFor renders a hypothesis reference (colored dot + display name) for a given
+// id using the board index — the one place every non-card reference resolves its
+// color and state from. A reference to a hypothesis not on the board (shouldn't
+// happen, but data can drift) falls back to a plain display name.
+function chipFor(idx, id) {
+  if (!id) return `<span class="muted">—</span>`;
+  const meta = idx.get(id);
+  if (!meta) return esc(displayName(id));
+  return hypChip(id, hypothesisColor(meta.index), meta.status);
+}
 
 // activeSource holds the current EventSource so navigating away can close it. A
 // lingering stream would otherwise hold a daemon subscriber slot per visited case.
@@ -30,43 +64,131 @@ function descriptionPanel(sess) {
   return `<div class="panel description">${body}</div>`;
 }
 
-function resolutionPanel(sess) {
+// confirmedHyp returns the winning hypothesis for the verdict panel: the one the
+// resolution names, else any hypothesis marked confirmed on the board. A case with
+// neither has no verdict to show (returns null → no panel, D3).
+function confirmedHyp(sess, hyps) {
   const r = sess.resolution;
-  if (!r) return "";
+  if (r && r.confirmed_hypothesis_id) {
+    const named = hyps.find((h) => h.id === r.confirmed_hypothesis_id);
+    if (named) return named;
+  }
+  return hyps.find((h) => h.status === "confirmed") || null;
+}
+
+// confirmingProbes returns the probes attributed to the confirmed hypothesis, for
+// the "Confirmed by" fact row — the instrumentation that settled the case.
+function confirmingProbes(probes, hypId) {
+  return (probes || []).filter((p) => p.hypothesis_id === hypId);
+}
+
+// factRow renders one labeled fact in the verdict's label/value grid. value is
+// pre-built HTML (chips/escaped text); label is a literal from this file.
+function factRow(label, value) {
+  return `<div class="fact"><span class="fact-label">${label}</span><span class="fact-value">${value}</span></div>`;
+}
+
+// verdictPanel renders the case's climax ABOVE the board when a hypothesis is
+// confirmed or a resolution is recorded (polish-case-board D3): the confirmed
+// statement as the coral headline, then Root cause / Fix / Confirmed by / Closed
+// fact rows. Confirmed-by lists the attributed probes' display names and the runs
+// they fired in as chips. An open case with no confirmation renders nothing — no
+// empty panel. idx supplies the confirmed hypothesis's chip (which carries coral).
+function verdictPanel(sess, hyps, probes, runs, idx) {
+  const win = confirmedHyp(sess, hyps);
+  const r = sess.resolution;
+  if (!win && !r) return "";
+
+  const rootCause = (r && r.root_cause) || "";
+  const fix = (r && r.fix_summary) || "";
+
+  // The statement is the headline; fall back to the resolution's root cause if the
+  // board carries no confirmed hypothesis (resolution-only legacy close).
+  const headline = win ? cleanStatement(win.statement) : rootCause;
+
+  const probeChips = win
+    ? confirmingProbes(probes, win.id)
+        .map((p) => `<span class="ev-chip">${esc(displayName(p.id))}</span>`)
+        .join("")
+    : "";
+  // Closed runs carry verdicts; surface them as the runs that produced the proof.
+  const runChips = (runs || [])
+    .filter((rn) => rn.closed_at)
+    .map(
+      (rn) =>
+        `<span class="ev-chip run">${esc(displayName(rn.id))}${
+          rn.verdict ? ` · ${esc(rn.verdict)}` : ""
+        }</span>`
+    )
+    .join("");
+
+  const facts = html([
+    win ? factRow("Confirmed suspect", chipFor(idx, win.id)) : "",
+    rootCause ? factRow("Root cause", esc(rootCause)) : "",
+    fix ? factRow("Fix", esc(fix)) : "",
+    probeChips || runChips
+      ? factRow(
+          "Confirmed by",
+          `<span class="ev-chips">${probeChips}${runChips}</span>`
+        )
+      : "",
+    r && r.closed_at ? factRow("Closed", esc(fmtDate(r.closed_at))) : "",
+  ]);
+
   return `
-    <div class="panel" style="border-left:4px solid var(--ok)">
-      <h2 style="margin-top:0">Resolution</h2>
-      ${r.root_cause ? `<div><b>Root cause:</b> ${esc(r.root_cause)}</div>` : ""}
-      ${r.fix_summary ? `<div><b>Fix:</b> ${esc(r.fix_summary)}</div>` : ""}
-      ${
-        r.confirmed_hypothesis_id
-          ? `<div><b>Confirmed suspect:</b> <span class="pid">${esc(
-              r.confirmed_hypothesis_id
-            )}</span></div>`
-          : ""
-      }
-      <div class="note">Closed ${fmtDate(r.closed_at)}</div>
+    <section class="verdict">
+      <div class="verdict-label">Verdict</div>
+      <h2 class="verdict-headline">${esc(headline)}</h2>
+      <div class="facts">${facts}</div>
+    </section>`;
+}
+
+// suspectPanel renders one active/confirmed hypothesis card: a left-edge color bar
+// (its palette color, or coral when confirmed) plus the display name, the cleaned
+// statement, and its status badge (polish-case-board D2). meta carries the board
+// index (→ color) and is supplied by the caller from hypIndex.
+function suspectPanel(h, index) {
+  const confirmed = h.status === "confirmed";
+  const killed = h.status === "killed";
+  // Confirmed owns coral; killed desaturates (muted accent); otherwise palette.
+  const color = confirmed ? "var(--coral)" : killed ? "var(--muted)" : hypothesisColor(index);
+  const statusLabel = killed ? "ruled out" : h.status;
+  return `
+    <div class="panel suspect ${confirmed ? "confirmed" : ""} ${
+    killed ? "killed" : ""
+  }" data-hid="${esc(h.id)}" style="--chip:${esc(color)}">
+      <div class="statement">${hypChip(
+        h.id,
+        color,
+        h.status
+      )} ${esc(cleanStatement(h.statement))} ${badge(h.status, statusLabel)}</div>
+      ${h.note ? `<div class="note">${esc(cleanStatement(h.note))}</div>` : ""}
     </div>`;
 }
 
-function suspectPanel(h) {
+// ruledOutItem renders one killed hypothesis as a muted "ruled out" line beneath
+// the active board (polish-case-board D3): the story reads verdict-first, surviving
+// suspects next, eliminated ones receding at the bottom.
+function ruledOutItem(h, index) {
   return `
-    <div class="panel ${h.status === "killed" ? "killed" : ""}" data-hid="${esc(h.id)}">
-      <div class="statement"><span class="pid">${esc(h.id)}</span> ${esc(
-    h.statement
-  )} ${badge(h.status, h.status)}</div>
-      ${h.note ? `<div class="note">${esc(h.note)}</div>` : ""}
+    <div class="ruled-out" data-hid="${esc(h.id)}" style="--chip:${esc(
+    hypothesisColor(index)
+  )}">
+      ${hypChip(h.id, hypothesisColor(index), "killed")}
+      <span class="ro-statement">${esc(cleanStatement(h.statement))}</span>
+      ${badge("killed", "ruled out")}
+      ${h.note ? `<div class="note">${esc(cleanStatement(h.note))}</div>` : ""}
     </div>`;
 }
 
-function probeRow(p) {
+function probeRow(p, idx) {
   return `
     <tr>
       <td>${loc(p.file, p.line)}</td>
-      <td><span class="pid">${esc(p.id)}</span></td>
-      <td>${esc(p.hypothesis_id || "—")}</td>
+      <td>${esc(displayName(p.id))}</td>
+      <td>${chipFor(idx, p.hypothesis_id)}</td>
       <td>${p.removed ? badge("closed", "removed") : badge("open", "live")}</td>
-      <td>${esc(p.note || "")}</td>
+      <td>${esc(cleanStatement(p.note) || "")}</td>
     </tr>`;
 }
 
@@ -76,7 +198,7 @@ function runRow(r) {
     : badge("open", "open");
   return `
     <tr>
-      <td><span class="pid">${esc(r.id)}</span></td>
+      <td>${esc(displayName(r.id))}</td>
       <td>${status}</td>
       <td>${fmtDate(r.started_at)}</td>
       <td>${r.closed_at ? fmtDate(r.closed_at) : "—"}</td>
@@ -121,7 +243,9 @@ async function seedEvidence(tail, sess) {
     tail.innerHTML = `<p class="muted">No probe hits recorded.</p>`;
     return;
   }
-  tail.innerHTML = rows.map((r) => tailRow(r.ts, r.probe, r.body, "", false, r.truncated)).join("");
+  tail.innerHTML = rows
+    .map((r) => tailRow(r.ts, displayName(r.probe), r.body, "", false, r.truncated))
+    .join("");
   tail.scrollTop = tail.scrollHeight;
 }
 
@@ -129,7 +253,7 @@ async function seedEvidence(tail, sess) {
 // the tail (case-board-ui spec: watching a reproduction live). The board section
 // is re-rendered on a board event so hypothesis status updates appear without a
 // reload. EventSource reconnects natively; closeStream() releases the subscriber.
-function startStream(view, tail, dot, sess) {
+function startStream(view, tail, dot, sess, indexOf) {
   const source = api.events(sess.id);
   activeSource = source;
   source.onopen = () => dot.classList.add("on");
@@ -143,27 +267,34 @@ function startStream(view, tail, dot, sess) {
 
   source.addEventListener("log", (e) => {
     const ev = JSON.parse(e.data).payload || {};
-    append(ev.ts, ev.probe, eventBody(ev), "");
+    append(ev.ts, displayName(ev.probe), eventBody(ev), "");
   });
   source.addEventListener("run", (e) => {
     const run = JSON.parse(e.data).payload || {};
     append(
       run.started_at || new Date().toISOString(),
-      run.id,
+      displayName(run.id),
       run.closed_at ? `run closed: ${esc(run.verdict || "")}` : "run opened",
       "run"
     );
   });
   source.addEventListener("probe", (e) => {
     const p = JSON.parse(e.data).payload || {};
-    append(new Date().toISOString(), p.id, `probe ${p.removed ? "removed" : "registered"} @ ${esc(p.file)}:${esc(p.line)}`, "probe");
+    append(new Date().toISOString(), displayName(p.id), `probe ${p.removed ? "removed" : "registered"} @ ${esc(p.file)}:${esc(p.line)}`, "probe");
   });
   source.addEventListener("board", (e) => {
     const h = JSON.parse(e.data).payload || {};
-    append(new Date().toISOString(), h.id, `${esc(h.statement || "")} → ${esc(h.status || "")}`, "board");
-    // Reflect the status change in the suspect board in place when the panel exists.
-    const panel = view.querySelector(`.panel[data-hid="${CSS.escape(h.id)}"]`);
-    if (panel) panel.outerHTML = suspectPanel(h);
+    append(
+      new Date().toISOString(),
+      displayName(h.id),
+      `${esc(cleanStatement(h.statement) || "")} → ${esc(h.status || "")}`,
+      "board"
+    );
+    // Reflect the status change in the suspect board in place. Re-render with the
+    // hypothesis's stable board index so its palette color never shifts mid-session;
+    // an unknown id (newly streamed) falls back to position 0.
+    const panel = view.querySelector(`.suspect[data-hid="${CSS.escape(h.id)}"]`);
+    if (panel) panel.outerHTML = suspectPanel(h, indexOf(h.id));
   });
 }
 
@@ -182,6 +313,20 @@ export async function renderDetail(view, id) {
   const probes = sess.probes || [];
   const runs = sess.runs || [];
 
+  // The board index (id → position) fixes each hypothesis's palette color for the
+  // whole view; every chip resolves through it (polish-case-board D2).
+  const idx = hypIndex(hyps);
+  const indexOf = (id) => {
+    const meta = idx.get(id);
+    return meta ? meta.index : 0;
+  };
+
+  // The active board carries surviving suspects (active + confirmed). Killed
+  // hypotheses recede into a muted "ruled out" list below it (D3) so the story
+  // reads verdict → survivors → eliminated, top-down.
+  const active = hyps.filter((h) => h.status !== "killed");
+  const ruledOut = hyps.filter((h) => h.status === "killed");
+
   view.innerHTML = html([
     caseHeader(sess),
     `<div class="crumbs">#${esc(sess.id)} · ${esc(sess.cwd || "?")} · opened ${fmtDate(
@@ -192,15 +337,25 @@ export async function renderDetail(view, id) {
        <a href="#/case/${esc(sess.id)}/diff">Compare runs</a>
      </div>`,
     descriptionPanel(sess),
-    resolutionPanel(sess),
+
+    // Verdict panel leads when the case is solved; renders nothing on an open,
+    // unconfirmed case (D3 — no empty panel).
+    verdictPanel(sess, hyps, probes, runs, idx),
 
     `<h2>Suspects (${hyps.length})</h2>`,
-    hyps.length ? hyps.map(suspectPanel).join("") : `<p class="empty">No suspects on the board yet.</p>`,
+    active.length
+      ? active.map((h) => suspectPanel(h, indexOf(h.id))).join("")
+      : `<p class="empty">No suspects on the board yet.</p>`,
+    ruledOut.length
+      ? `<div class="ruled-out-list"><div class="section-label">Ruled out (${ruledOut.length})</div>${ruledOut
+          .map((h) => ruledOutItem(h, indexOf(h.id)))
+          .join("")}</div>`
+      : "",
 
     `<h2>Probes (${probes.length})</h2>`,
     probes.length
-      ? `<table><thead><tr><th>Location</th><th>Probe</th><th>Suspect</th><th>Status</th><th>Note</th></tr></thead><tbody>${probes
-          .map(probeRow)
+      ? `<table><thead><tr><th>Location</th><th>Probe</th><th>Hypothesis</th><th>Status</th><th>Note</th></tr></thead><tbody>${probes
+          .map((p) => probeRow(p, idx))
           .join("")}</tbody></table>`
       : `<p class="empty">No probes registered.</p>`,
 
@@ -224,6 +379,6 @@ export async function renderDetail(view, id) {
   // needed (and the daemon would never publish for it).
   if (open) {
     const dot = view.querySelector("#liveDot");
-    startStream(view, tail, dot, sess);
+    startStream(view, tail, dot, sess, indexOf);
   }
 }

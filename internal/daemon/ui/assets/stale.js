@@ -4,7 +4,7 @@
 // --stale`).
 
 import { api } from "./api.js";
-import { esc, loc, html } from "./render.js";
+import { esc, loc, html, displayName } from "./render.js";
 
 export async function renderStale(view) {
   view.innerHTML = `<p class="loading">Loading stale probes…</p>`;
@@ -28,11 +28,11 @@ export async function renderStale(view) {
       (sp) => `
       <tr>
         <td>${loc(sp.probe.file, sp.probe.line)}</td>
-        <td><span class="pid">${esc(sp.probe.id)}</span></td>
+        <td>${esc(displayName(sp.probe.id))}</td>
         <td><a href="#/case/${encodeURIComponent(sp.session_id)}">${esc(
         sp.session_title || sp.session_id
       )}</a> <span class="pid">#${esc(sp.session_id)}</span></td>
-        <td>${esc(sp.probe.hypothesis_id || "—")}</td>
+        <td>${esc(displayName(sp.probe.hypothesis_id) || "—")}</td>
         <td>${esc(sp.probe.note || "")}</td>
       </tr>`
     )
@@ -41,7 +41,7 @@ export async function renderStale(view) {
     `<h1>Stale probes <span class="muted">(${stale.length})</span></h1>`,
     `<p class="muted">Probe lines still in your code. Delete each one and it disappears from this list once <code>remove_probe</code> runs.</p>`,
     `<table>
-      <thead><tr><th>Location</th><th>Probe</th><th>Case</th><th>Suspect</th><th>Note</th></tr></thead>
+      <thead><tr><th>Location</th><th>Probe</th><th>Case</th><th>Hypothesis</th><th>Note</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`,
   ]);

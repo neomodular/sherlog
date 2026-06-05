@@ -11,6 +11,8 @@ here. See docs/brand.md. -->
 
 # sherlog
 
+> *Elementary, dear developer.*
+
 Hypothesis-driven debugging for Claude Code. A single Go binary that runs as a
 localhost daemon and an MCP server, plus a `/debug` skill that drives a
 detective loop: name suspects, plant one discriminating probe each, wait while

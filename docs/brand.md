@@ -81,6 +81,48 @@ Three exact phrases mark three transitions, and **nothing else** does:
 These are earned, not garnish: "elementary." requires confirming evidence, and
 "case closed" requires a clean cleanup grep. Do not use them at other moments.
 
+## Tagline
+
+**"Elementary, dear developer."** is the product tagline. It appears beside the
+sherlog wordmark in the Case Board header (subordinate to the wordmark — muted,
+italic) and as the README hero strapline. It identifies the product; it is *not*
+a transition phrase.
+
+Keep it distinct from the **"elementary."** *moment* in the vocabulary table
+above: that single earned word stays reserved for a confirmed root cause and is
+never printed elsewhere. The tagline is the always-on product phrase; the
+"elementary." moment is the once-per-case payoff. Do not blur the two.
+
+## Hypothesis palette (Case Board)
+
+The Case Board colors each hypothesis from a fixed, colorblind-safe categorical
+palette so suspects are distinguishable at a glance and a color follows its
+hypothesis across every view (board card, probes table, evidence, verdict). This
+is a **board affordance only** — it does not touch the two-color terminal sprite
+rule above.
+
+| # | Color | Hex |
+|---|---|---|
+| 1 | blue | `#0072b2` |
+| 2 | bluish green | `#009e73` |
+| 3 | reddish purple | `#cc79a7` |
+| 4 | sky blue | `#56b4e9` |
+| 5 | vermillion | `#d55e00` |
+| 6 | muted violet | `#9467bd` |
+
+Rules:
+
+- **Assigned by index, cycling.** Hypothesis 1 → color 1, … Hypothesis 7 → color 1
+  again. Colors are derived from the Okabe–Ito colorblind-safe set, tuned to the
+  board's light surface.
+- **Color always pairs with the name.** A color chip never carries meaning alone —
+  it always sits beside "Hypothesis N".
+- **Coral = confirmed, only.** A confirmed hypothesis takes the brand coral accent
+  regardless of its palette color; the verdict owns coral, so coral is absent from
+  the palette above.
+- **Muted = ruled out.** A killed hypothesis desaturates to muted gray with a
+  visible "ruled out" status and recedes below the active board.
+
 ## Usage rules
 
 - **Detective vs. minimal.** The full presentation (sprite, status line,

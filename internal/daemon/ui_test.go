@@ -136,6 +136,48 @@ func TestCaseBoardRendersTitles(t *testing.T) {
 	}
 }
 
+// TestCaseBoardPolish guards the polish-case-board UI wiring against regression
+// (string checks against the embedded assets — the assets stay embedded, GET-only,
+// and free of external origins, all covered above; this asserts the new rendering
+// is present). It covers: the header tagline, the display-name helper + legacy
+// self-prefix strip adopted across views, the hypothesis palette + chip, the
+// "Hypothesis" probes-table header, and the verdict panel.
+func TestCaseBoardPolish(t *testing.T) {
+	srv, _ := newTestServer(t)
+	checks := []struct {
+		path string
+		want []string
+	}{
+		// Product tagline beside the wordmark (D4).
+		{"/", []string{"Elementary, dear developer.", "tagline"}},
+		// Display-name derivation, legacy self-prefix strip, palette, and chip all
+		// live in render.js and are exported for every view (D1/D2).
+		{"/render.js", []string{
+			"displayName", "Hypothesis", "Probe",
+			"cleanStatement", "hypothesisColor", "hypChip",
+		}},
+		// Detail adopts display names + chips, leads with the verdict panel, and
+		// collapses killed hypotheses to a ruled-out list (D2/D3).
+		{"/detail.js", []string{
+			"displayName", "hypChip", "verdictPanel", "ruledOut", "Confirmed by",
+		}},
+		// Probes table column reads "Hypothesis", and references use display names.
+		{"/detail.js", []string{"<th>Hypothesis</th>"}},
+		// Diff and stale views also upgrade raw IDs to display names (D1).
+		{"/diff.js", []string{"displayName"}},
+		{"/stale.js", []string{"displayName"}},
+	}
+	for _, c := range checks {
+		w := do(srv, http.MethodGet, c.path, "")
+		body := readBody(t, w)
+		for _, want := range c.want {
+			if !strings.Contains(body, want) {
+				t.Errorf("asset %s missing %q (polish wiring regressed)", c.path, want)
+			}
+		}
+	}
+}
+
 // readBody drains a recorder's body to a string for content assertions.
 func readBody(t *testing.T, w *httptest.ResponseRecorder) string {
 	t.Helper()

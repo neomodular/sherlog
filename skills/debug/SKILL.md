@@ -128,6 +128,14 @@ Make them genuinely different mechanisms, not three flavours of one guess. For
 session cache; h3 connection-pool exhaustion under load. Breadth here is what
 makes the evidence decisive later.
 
+**Store statements as bare claims — no self-ID prefix.** Write the hypothesis
+statement (and every evidence note) *without* leading with its own identifier:
+`"race between token refresh and request"`, never `"h1: race between token
+refresh and request"`. Display naming is the Case Board's job — it renders
+"Hypothesis 1" from the id and would otherwise show a duplicated label. Referring
+to *another* entity inside a note is fine and encouraged (`"p3 fired only in run
+r2"`); the UI upgrades those references to display names where it shows them.
+
 ## 3 · Plant discriminating probes (≥1 per suspect)
 
 For **every** hypothesis, place at least one probe whose output *distinguishes

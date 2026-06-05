@@ -5,7 +5,7 @@
 // badged too so a partial count is never mistaken for a complete one.
 
 import { api } from "./api.js";
-import { esc, badge, html, eventBody } from "./render.js";
+import { esc, badge, html, eventBody, displayName } from "./render.js";
 
 // runLabel describes a run for the picker: id + verdict, so a user can tell the
 // reproduced run from the fixed-check run without cross-referencing.
@@ -35,7 +35,7 @@ function sideCell(side) {
 function diffRow(pd) {
   return `
     <tr class="${pd.divergent ? "divergent" : ""}">
-      <td><span class="pid">${esc(pd.probe)}</span> ${
+      <td>${esc(displayName(pd.probe))} ${
     pd.divergent ? badge("divergent", "divergent") : ""
   }</td>
       ${sideCell(pd.a)}

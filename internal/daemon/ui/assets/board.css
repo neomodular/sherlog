@@ -58,6 +58,9 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .wordmark { display: flex; flex-direction: column; line-height: 1.1; }
 .wordmark .name { font-weight: 700; letter-spacing: 0.04em; font-size: 1.15rem; }
 .wordmark .tag { font-size: 0.7rem; color: var(--coral); text-transform: uppercase; letter-spacing: 0.18em; }
+/* Product tagline — subordinate to the wordmark (polish-case-board D4): muted,
+   italic, smaller than the name. It identifies the product; it is not a heading. */
+.wordmark .tagline { font-size: 0.72rem; color: #b9c4d6; font-style: italic; letter-spacing: 0.01em; margin-top: 0.1rem; }
 .nav { display: flex; gap: 1rem; margin-left: auto; }
 .nav a {
   color: var(--paper);
@@ -222,3 +225,60 @@ tr.divergent td { background: #fff4f2; }
 .src-default { background: #d9d2c4; color: var(--navy-ink); }
 .src-file { background: #dbe4f4; color: var(--navy); }
 .src-env { background: #f6e6c4; color: var(--warn); }
+
+/* --- hypothesis identity: color chips + suspect cards (polish-case-board D2) --- */
+/* A hypothesis reference: colored dot + display name. The dot color comes from the
+   --chip custom property the JS sets per reference; color ALWAYS pairs with the
+   name (never carries meaning alone). */
+.hyp-chip { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 600; color: var(--ink); white-space: nowrap; }
+.hyp-dot { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; background: var(--chip, var(--muted)); flex: none; }
+/* Confirmed owns coral; killed desaturates and reads "ruled out" by its dot+badge. */
+.hyp-chip.confirmed { color: var(--coral-dim); }
+.hyp-chip.killed { color: var(--muted); }
+.hyp-chip.killed .hyp-dot { background: var(--muted); }
+
+/* Suspect card: a left-edge color bar (its palette color via --chip), so the board
+   reads as a row of distinct, color-coded suspects. */
+.panel.suspect { border-left: 4px solid var(--chip, var(--navy)); }
+.panel.suspect.confirmed { border-left-color: var(--coral); background: #fff8f6; }
+.panel.suspect.killed { border-left-color: var(--muted); opacity: 0.75; }
+
+/* Ruled-out list: killed hypotheses receding below the active board (D3) — muted,
+   compact, struck status. */
+.ruled-out-list { margin-bottom: 0.6rem; }
+.ruled-out {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-left: 3px solid var(--muted);
+  opacity: 0.78;
+  font-size: 0.9rem;
+}
+.ruled-out .ro-statement { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--paper-line); }
+.ruled-out .note { width: 100%; }
+
+/* --- verdict panel: the case's climax, above the board (polish-case-board D3) --- */
+/* Calm and spacious; coral is the only accent — the facts are the design. */
+.verdict {
+  background: #fff;
+  border: 1px solid var(--paper-line);
+  border-top: 4px solid var(--coral);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.5rem 1.4rem;
+  margin: 0.5rem 0 1.5rem;
+}
+.verdict-label { text-transform: uppercase; letter-spacing: 0.16em; font-size: 0.7rem; font-weight: 700; color: var(--coral-dim); margin-bottom: 0.4rem; }
+.verdict-headline { color: var(--coral-dim); font-size: 1.5rem; line-height: 1.25; margin: 0 0 1rem; }
+.verdict .facts { display: grid; gap: 0.55rem; }
+.verdict .fact { display: grid; grid-template-columns: 9rem 1fr; gap: 0.75rem; align-items: baseline; }
+.verdict .fact-label { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.verdict .fact-value { color: var(--ink); }
+.verdict .ev-chips { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; }
+.ev-chip { display: inline-block; font-family: var(--mono); font-size: 0.78rem; padding: 0.1rem 0.5rem; border-radius: 999px; background: #eef2f8; color: var(--navy); }
+.ev-chip.run { background: #f1ece0; color: var(--navy-ink); }
+
+@media (max-width: 30rem) {
+  .verdict .fact { grid-template-columns: 1fr; gap: 0.15rem; }
+}
