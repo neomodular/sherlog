@@ -25,13 +25,15 @@ Open a new investigation. Start every session here.
 
 | Param | Type | Required | Meaning |
 |---|---|---|---|
-| `bug_description` | string | yes | The bug being investigated. |
+| `title` | string | no | Short, specific case title (≤60 chars), e.g. `Login 401 after idle timeout`. The case identity shown in lists, the banner, recall, and resume. Omit and the daemon derives a word-boundary-truncated fallback from the description (backward compatible). |
+| `bug_description` | string | yes | The bug being investigated. The skill writes it as soft-structured plain text (`Symptom:` / `Expected:` / `Repro:` / `Context:` lines, only those with real content). |
 
 **Result:**
 
 ```json
 {
   "session_id": "a1b2c3",
+  "title": "Login 401 after idle timeout",
   "probe_contract": {
     "url_template": "http://127.0.0.1:2218/log/a1b2c3/<probe>",
     "note": "Fire-and-forget: never await the call, never set a JSON Content-Type …",
@@ -43,14 +45,17 @@ Open a new investigation. Start every session here.
 }
 ```
 
+- `title` — the case identity, echoed back: the supplied title, or the daemon's
+  derived fallback when omitted. Always non-empty.
 - `probe_contract` — the URL template and per-language one-liners (see
   [probe-contract.md](probe-contract.md)).
 - `preferences` — skill presentation (`verbosity`, `color`) from effective config.
 - `warn_same_cwd` — a concurrent open session in the same directory, or `null`.
   Advisory; does not block.
 - `related_cases` — possibly-related **solved** past cases recall surfaced for
-  this description (`session_id`, `description`, `root_cause`, `fix_summary`,
-  `score`). Leads only — never evidence.
+  this description (`session_id`, `title`, `description`, `root_cause`,
+  `fix_summary`, `score`). Each is identified by its `title`. Leads only — never
+  evidence.
 
 ### `debug_resume`
 
@@ -60,8 +65,9 @@ Reconstruct an investigation after context loss (returns the full session state)
 |---|---|---|---|
 | `session_id` | string | no | The session to resume; omit for the latest open one. |
 
-**Result:** the full `Session` object — `id`, `description`, `cwd`, `created_at`,
-`closed_at`, `hypotheses[]`, `probes[]`, `runs[]`, and `resolution` (when solved).
+**Result:** the full `Session` object — `id`, `title`, `description`, `cwd`,
+`created_at`, `closed_at`, `hypotheses[]`, `probes[]`, `runs[]`, and `resolution`
+(when solved). `title` is always non-empty (a derived fallback for legacy sessions).
 
 ### `debug_end`
 

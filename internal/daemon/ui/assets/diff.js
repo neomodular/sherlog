@@ -113,11 +113,14 @@ export async function renderDiff(view, sess, a, b) {
     </table>`;
 }
 
-// caseHeader is the breadcrumb + title shared by detail and diff views.
+// caseHeader is the breadcrumb + title shared by detail and diff views. The
+// heading is the case title (the scannable identity), not the description
+// (add-case-titles: detail shows the title as the header). The daemon always sends
+// a non-empty title (real or derived), so the title field is authoritative here.
 function caseHeader(sess) {
   return `
     <div class="crumbs"><a href="#/cases">Cases</a> › #${esc(sess.id)}</div>
-    <h1>${esc(sess.description || "(no description)")}</h1>`;
+    <h1>${esc(sess.title || "(untitled case)")}</h1>`;
 }
 
 export { caseHeader };

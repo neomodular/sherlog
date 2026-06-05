@@ -28,9 +28,13 @@ function card(s) {
       resLine = `<div class="resolution muted">Closed without a recorded resolution.</div>`;
     }
   }
+  // The list shows the title (the scannable case identity), never the full
+  // description (add-case-titles: lists show the title). The daemon always sends a
+  // non-empty title — a real one or a description-derived fallback for legacy
+  // cases — so the title field is the single source here.
   return `
     <a class="case-card ${closed ? "closed" : ""}" href="#/case/${encodeURIComponent(s.id)}">
-      <div class="desc">${esc(s.description || "(no description)")} ${badge(
+      <div class="desc">${esc(s.title || "(untitled case)")} ${badge(
     closed ? "closed" : "open",
     closed ? "closed" : "open"
   )}</div>

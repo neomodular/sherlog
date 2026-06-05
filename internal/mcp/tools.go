@@ -15,9 +15,10 @@ import (
 // daemon is up (D2) so a tool call on a fresh machine self-heals.
 func registerTools(server *mcpsdk.Server, c *daemonClient) {
 	add(server, c, "debug_start",
-		"Open a new debugging investigation. Returns the session ID, the probe URL "+
-			"template, and fire-and-forget probe one-liners for JS/browser, Python, Go, "+
-			"Ruby, and curl. Start every debug session here.",
+		"Open a new debugging investigation. Provide a short, specific title (the case "+
+			"identity, ≤60 chars) and a detailed bug_description. Returns the session ID, "+
+			"the probe URL template, and fire-and-forget probe one-liners for JS/browser, "+
+			"Python, Go, Ruby, and curl. Start every debug session here.",
 		debugStart)
 
 	add(server, c, "debug_resume",
@@ -109,11 +110,20 @@ func add[In, Out any](server *mcpsdk.Server, c *daemonClient, name, desc string,
 // --- debug_start / debug_resume / debug_end (D9, 4.3) ---
 
 type debugStartIn struct {
+	// Title is the agent-authored case identity (add-case-titles D1/D4): a short,
+	// specific summary of the failure (≤60 chars). Optional for backward
+	// compatibility — an older caller that omits it still works, and the daemon
+	// derives a fallback title from the description (mcp-server spec: Legacy caller).
+	Title          string `json:"title,omitempty" jsonschema:"short specific case title (≤60 chars), e.g. 'Login 401 after idle timeout'"`
 	BugDescription string `json:"bug_description" jsonschema:"the bug being investigated"`
 }
 
 type debugStartOut struct {
-	SessionID     string         `json:"session_id"`
+	SessionID string `json:"session_id"`
+	// Title echoes the case identity the session was created with (mcp-server spec:
+	// the response echoes it). Always non-empty: the daemon derives a fallback when
+	// the caller omitted a title.
+	Title         string         `json:"title"`
 	ProbeContract probeContract  `json:"probe_contract"`
 	Preferences   preferences    `json:"preferences"`             // skill presentation (design D4)
 	WarnSameCWD   *store.Session `json:"warn_same_cwd,omitempty"` // a concurrent open session here
@@ -125,12 +135,15 @@ type debugStartOut struct {
 
 func debugStart(ctx context.Context, c *daemonClient, in debugStartIn) (debugStartOut, error) {
 	cwd, _ := os.Getwd() // best-effort: same-cwd warning is advisory
-	res, err := c.createSession(ctx, in.BugDescription, cwd)
+	res, err := c.createSession(ctx, in.Title, in.BugDescription, cwd)
 	if err != nil {
 		return debugStartOut{}, fmt.Errorf("debug_start: %w", err)
 	}
 	return debugStartOut{
-		SessionID:     res.Session.ID,
+		SessionID: res.Session.ID,
+		// The daemon-side session carries the title (the supplied one, or the derived
+		// fallback when omitted), so echo it from the response, never from the input.
+		Title:         res.Session.Title,
 		ProbeContract: buildProbeContract(c.probeURLTemplate(res.Session.ID)),
 		Preferences:   res.Preferences,
 		WarnSameCWD:   res.ExistingSameCWD,

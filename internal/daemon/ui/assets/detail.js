@@ -4,7 +4,7 @@
 // case detail + live evidence tail; design D7).
 
 import { api } from "./api.js";
-import { esc, badge, loc, fmtDate, fmtTime, eventBody, html } from "./render.js";
+import { esc, badge, loc, fmtDate, fmtTime, eventBody, html, renderDescription } from "./render.js";
 import { caseHeader } from "./diff.js";
 
 // activeSource holds the current EventSource so navigating away can close it. A
@@ -18,6 +18,16 @@ export function closeStream() {
     activeSource.close();
     activeSource = null;
   }
+}
+
+// descriptionPanel shows the full bug description below the title header
+// (add-case-titles D3): the detail view is title-header + description. Soft-
+// structure heading lines (Symptom:/Expected:/Repro:/Context:) are bolded on
+// render (renderDescription). An empty description yields no panel.
+function descriptionPanel(sess) {
+  const body = renderDescription(sess.description);
+  if (!body) return "";
+  return `<div class="panel description">${body}</div>`;
 }
 
 function resolutionPanel(sess) {
@@ -181,6 +191,7 @@ export async function renderDetail(view, id) {
        <a href="#/case/${esc(sess.id)}" class="active">Detail</a>
        <a href="#/case/${esc(sess.id)}/diff">Compare runs</a>
      </div>`,
+    descriptionPanel(sess),
     resolutionPanel(sess),
 
     `<h2>Suspects (${hyps.length})</h2>`,

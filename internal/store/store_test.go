@@ -31,7 +31,7 @@ var idPattern = regexp.MustCompile(`^[0-9a-z]{8,}$`)
 func TestSessionCreated(t *testing.T) {
 	s := newTestStore(t)
 
-	sess, existing, err := s.CreateSession("login fails intermittently", "/home/u/code/app")
+	sess, existing, err := s.CreateSession("", "login fails intermittently", "/home/u/code/app")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestRandomIDsUnique(t *testing.T) {
 	s := newTestStore(t)
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		sess, _, err := s.CreateSession("bug", fmt.Sprintf("/cwd/%d", i))
+		sess, _, err := s.CreateSession("", "bug", fmt.Sprintf("/cwd/%d", i))
 		if err != nil {
 			t.Fatalf("CreateSession %d: %v", i, err)
 		}
@@ -76,7 +76,7 @@ func TestRandomIDsUnique(t *testing.T) {
 func TestSameCWDDetection(t *testing.T) {
 	s := newTestStore(t)
 
-	first, _, err := s.CreateSession("bug A", "/repo/x")
+	first, _, err := s.CreateSession("", "bug A", "/repo/x")
 	if err != nil {
 		t.Fatalf("create first: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestSameCWDDetection(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, existing, err := s.CreateSession("bug B", tc.cwd)
+			_, existing, err := s.CreateSession("", "bug B", tc.cwd)
 			if err != nil {
 				t.Fatalf("create: %v", err)
 			}
@@ -113,14 +113,14 @@ func TestSameCWDDetection(t *testing.T) {
 // same-cwd warning (only open sessions count, per spec wording).
 func TestSameCWDClosedSessionIgnored(t *testing.T) {
 	s := newTestStore(t)
-	first, _, err := s.CreateSession("bug", "/repo/z")
+	first, _, err := s.CreateSession("", "bug", "/repo/z")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if _, err := s.CloseSession(first.ID); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	_, existing, err := s.CreateSession("bug 2", "/repo/z")
+	_, existing, err := s.CreateSession("", "bug 2", "/repo/z")
 	if err != nil {
 		t.Fatalf("create 2: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestSameCWDClosedSessionIgnored(t *testing.T) {
 // evidence": status and note persist and are readable afterward.
 func TestHypothesisKilledWithEvidence(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, err := s.CreateSession("bug", "/repo")
+	sess, _, err := s.CreateSession("", "bug", "/repo")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestHypothesisKilledWithEvidence(t *testing.T) {
 
 func TestUpdateHypothesisErrors(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("bug", "/repo")
+	sess, _, _ := s.CreateSession("", "bug", "/repo")
 	if _, err := s.UpdateHypothesis(sess.ID, "nope", HypothesisKilled, ""); !errors.Is(err, ErrHypothesisNotFound) {
 		t.Errorf("want ErrHypothesisNotFound, got %v", err)
 	}
@@ -178,7 +178,7 @@ func TestUpdateHypothesisErrors(t *testing.T) {
 // session end".
 func TestUnremovedProbesAtEnd(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("bug", "/repo")
+	sess, _, _ := s.CreateSession("", "bug", "/repo")
 
 	for _, p := range []Probe{
 		{ID: "p1", File: "auth.js", Line: 10, HypothesisID: "h1"},
@@ -205,8 +205,8 @@ func TestUnremovedProbesAtEnd(t *testing.T) {
 // later": unremoved probes are listed with session/file/line even after close.
 func TestStaleProbesAcrossSessions(t *testing.T) {
 	s := newTestStore(t)
-	a, _, _ := s.CreateSession("bug a", "/repo/a")
-	b, _, _ := s.CreateSession("bug b", "/repo/b")
+	a, _, _ := s.CreateSession("", "bug a", "/repo/a")
+	b, _, _ := s.CreateSession("", "bug b", "/repo/b")
 
 	s.RegisterProbe(a.ID, Probe{ID: "p1", File: "a.js", Line: 1})
 	s.RegisterProbe(a.ID, Probe{ID: "p2", File: "a2.js", Line: 2})
@@ -238,8 +238,8 @@ func TestResumeLatest(t *testing.T) {
 		t.Errorf("empty store should report ErrNoOpenSession, got %v", err)
 	}
 
-	old, _, _ := s.CreateSession("old bug", "/repo/old")
-	newer, _, _ := s.CreateSession("new bug", "/repo/new")
+	old, _, _ := s.CreateSession("", "old bug", "/repo/old")
+	newer, _, _ := s.CreateSession("", "new bug", "/repo/new")
 	s.SetHypotheses(newer.ID, []string{"suspect 1"})
 
 	got, err := s.ResumeLatest()
@@ -274,7 +274,7 @@ func TestRestartRecovery(t *testing.T) {
 		t.Fatalf("New s1: %v", err)
 	}
 
-	sess, _, _ := s1.CreateSession("intermittent 500", "/repo")
+	sess, _, _ := s1.CreateSession("", "intermittent 500", "/repo")
 	s1.SetHypotheses(sess.ID, []string{"race", "cache", "config"})
 	s1.UpdateHypothesis(sess.ID, "h1", HypothesisKilled, "ruled out in run 1")
 	s1.RegisterProbe(sess.ID, Probe{ID: "p1", File: "auth.js", Line: 45, HypothesisID: "h1"})
@@ -349,7 +349,7 @@ func TestFloodControl(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t, WithFloodN(n))
-			sess, _, _ := s.CreateSession("flood", "/repo/"+tc.name)
+			sess, _, _ := s.CreateSession("", "flood", "/repo/"+tc.name)
 			run, _ := s.OpenRun(sess.ID)
 			for i := 0; i < tc.count; i++ {
 				if err := s.Ingest(sess.ID, "p1", map[string]any{"i": float64(i)}, ""); err != nil {
@@ -389,7 +389,7 @@ func TestFloodControl(t *testing.T) {
 // TestFloodPerProbePerRun verifies buffers are isolated per probe and per run (D8).
 func TestFloodPerProbePerRun(t *testing.T) {
 	s := newTestStore(t, WithFloodN(3))
-	sess, _, _ := s.CreateSession("bug", "/repo")
+	sess, _, _ := s.CreateSession("", "bug", "/repo")
 
 	r1, _ := s.OpenRun(sess.ID)
 	s.Ingest(sess.ID, "pA", nil, "a1")
@@ -426,7 +426,7 @@ func TestFloodPerProbePerRun(t *testing.T) {
 // TestQueryLogsFilters exercises query_logs filtering and limit truncation (D9).
 func TestQueryLogsFilters(t *testing.T) {
 	s := newTestStore(t, WithFloodN(50))
-	sess, _, _ := s.CreateSession("bug", "/repo")
+	sess, _, _ := s.CreateSession("", "bug", "/repo")
 	run, _ := s.OpenRun(sess.ID)
 	for i := 0; i < 10; i++ {
 		s.Ingest(sess.ID, "p1", map[string]any{"i": float64(i)}, "")
@@ -471,7 +471,7 @@ func TestIngestUnknownSession(t *testing.T) {
 // TestRunVerdictAndReattach verifies run open/close and LatestOpenRun re-attach (D8).
 func TestRunVerdictAndReattach(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("bug", "/repo")
+	sess, _, _ := s.CreateSession("", "bug", "/repo")
 
 	if _, ok, err := s.LatestOpenRun(sess.ID); err != nil || ok {
 		t.Errorf("no run yet: ok=%v err=%v", ok, err)
@@ -497,7 +497,7 @@ func TestRunVerdictAndReattach(t *testing.T) {
 // not lost to data races.
 func TestConcurrentIngest(t *testing.T) {
 	s := newTestStore(t, WithFloodN(10))
-	sess, _, _ := s.CreateSession("bug", "/repo")
+	sess, _, _ := s.CreateSession("", "bug", "/repo")
 	run, _ := s.OpenRun(sess.ID)
 
 	const goroutines, perG = 20, 50
@@ -529,7 +529,7 @@ func TestConcurrentIngest(t *testing.T) {
 // surface to surface races in state mutation under -race.
 func TestConcurrentMixedOps(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("bug", "/repo")
+	sess, _, _ := s.CreateSession("", "bug", "/repo")
 	s.SetHypotheses(sess.ID, []string{"a", "b", "c"})
 	run, _ := s.OpenRun(sess.ID)
 
@@ -617,7 +617,7 @@ func orphanTotal(s *Store, sessionID string) int {
 // session starts but before await_run opens a run; opening the run adopts them.
 func TestAdoptFastReproduction(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("fast repro", "/repo")
+	sess, _, _ := s.CreateSession("", "fast repro", "/repo")
 
 	// Orphans fired after session start and before the run opens (the real
 	// ordering: session opens, probes fire, then await_run opens a run). Anchor on
@@ -653,7 +653,7 @@ func TestAdoptFastReproduction(t *testing.T) {
 // closed run's verdict are not pulled into the next run; only post-boundary ones.
 func TestAdoptBoundaryProtectsPriorRun(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("boundary", "/repo")
+	sess, _, _ := s.CreateSession("", "boundary", "/repo")
 
 	r1, _ := s.OpenRun(sess.ID)
 	s.Ingest(sess.ID, "p1", map[string]any{"k": "r1-direct"}, "")
@@ -691,7 +691,7 @@ func TestAdoptBoundaryProtectsPriorRun(t *testing.T) {
 // not adopted even when no prior run boundary would otherwise exclude it.
 func TestAdoptCapExcludesAncient(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("cap", "/repo")
+	sess, _, _ := s.CreateSession("", "cap", "/repo")
 
 	injectOrphan(t, s, sess.ID, "p1", time.Now().UTC().Add(-40*time.Minute), "ancient")
 
@@ -709,7 +709,7 @@ func TestAdoptCapExcludesAncient(t *testing.T) {
 // nothing: adoption happens only at open.
 func TestAdoptReattachNoOp(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("reattach", "/repo")
+	sess, _, _ := s.CreateSession("", "reattach", "/repo")
 
 	run, _ := s.OpenOrAttachRun(sess.ID) // opens r1
 	// An orphan arriving while the run is open would normally be a direct hit;
@@ -734,7 +734,7 @@ func TestAdoptSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New s1: %v", err)
 	}
-	sess, _, _ := s1.CreateSession("restart adopt", "/repo")
+	sess, _, _ := s1.CreateSession("", "restart adopt", "/repo")
 	injectOrphan(t, s1, sess.ID, "p1", sess.CreatedAt.Add(2*time.Millisecond), "x")
 	time.Sleep(5 * time.Millisecond)
 	run, _ := s1.OpenRun(sess.ID)
@@ -776,7 +776,7 @@ func TestAdoptThenDirectSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New s1: %v", err)
 	}
-	sess, _, _ := s1.CreateSession("adopt then direct", "/repo")
+	sess, _, _ := s1.CreateSession("", "adopt then direct", "/repo")
 
 	// Two orphans fire before the run opens (they will be adopted into it).
 	fired := sess.CreatedAt.Add(2 * time.Millisecond)
@@ -850,7 +850,7 @@ func TestAdoptThenDirectSurvivesRestart(t *testing.T) {
 func TestAdoptTruncatedSplitMinimum(t *testing.T) {
 	const n = 3
 	s := newTestStore(t, WithFloodN(n))
-	sess, _, _ := s.CreateSession("truncated split", "/repo")
+	sess, _, _ := s.CreateSession("", "truncated split", "/repo")
 
 	// Anchor on session start so the boundary lands after it (realistic ordering);
 	// use millisecond offsets and a short sleep so r2 opens strictly later.
@@ -906,7 +906,7 @@ func TestAdoptAllInWindowTruncatedExact(t *testing.T) {
 	const n = 3
 	const fired = 100 // >> 2N, forcing a dropped middle within the buffer
 	s := newTestStore(t, WithFloodN(n))
-	sess, _, _ := s.CreateSession("all-in-window truncated", "/repo")
+	sess, _, _ := s.CreateSession("", "all-in-window truncated", "/repo")
 
 	// Every orphan fires strictly after the adoption lower bound (session start)
 	// and before the run opens, so the whole buffer is post-boundary. Anchor on a
@@ -988,7 +988,7 @@ func TestAdoptMarkerOrderedAfterEventsUnderRace(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New s1: %v", err)
 		}
-		sess, _, _ := s1.CreateSession("race", "/repo")
+		sess, _, _ := s1.CreateSession("", "race", "/repo")
 
 		// Fire orphans and open a run concurrently. The orphans land in memory and
 		// their log lines flush asynchronously; OpenRun may observe them in memory
@@ -1081,7 +1081,7 @@ func TestAdoptMarkerOrderedAfterEventsUnderRace(t *testing.T) {
 // fail by making logs.jsonl unwritable.
 func TestAdoptMarkerFailureLeavesNoAdoption(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("marker fail", "/repo")
+	sess, _, _ := s.CreateSession("", "marker fail", "/repo")
 	injectOrphan(t, s, sess.ID, "p1", sess.CreatedAt.Add(2*time.Millisecond), "x")
 	time.Sleep(5 * time.Millisecond)
 
@@ -1109,7 +1109,7 @@ func TestAdoptMarkerFailureLeavesNoAdoption(t *testing.T) {
 // a run whose only events were adopted shows count and adopted equal per probe.
 func TestAdoptFullyAdoptedDisclosure(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("fully adopted", "/repo")
+	sess, _, _ := s.CreateSession("", "fully adopted", "/repo")
 	fired := sess.CreatedAt.Add(2 * time.Millisecond)
 	injectOrphan(t, s, sess.ID, "p1", fired, "a")
 	injectOrphan(t, s, sess.ID, "p2", fired, "b")

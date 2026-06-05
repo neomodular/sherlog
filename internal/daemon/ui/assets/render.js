@@ -63,3 +63,34 @@ export function eventBody(ev) {
 export function html(parts) {
   return parts.filter(Boolean).join("");
 }
+
+// descHeading matches a soft-structure heading at the start of a description line:
+// one of Symptom/Expected/Repro/Context followed by a colon (add-case-titles D2).
+// The skill writes these as plain text; the UI bolds them on render only — there is
+// no parser and no stored structure. Anchored to line start so a colon mid-sentence
+// is never mistaken for a heading.
+const descHeading = /^(Symptom|Expected|Repro|Context):/;
+
+// renderDescription renders a soft-structured description for the detail view
+// (add-case-titles D2/D3): every line is HTML-escaped first (probe/user text is
+// untrusted), then a leading Symptom:/Expected:/Repro:/Context: label is wrapped in
+// <b> — a render-only enhancement over the stored plain text. Lines are joined with
+// <br> so the structure is visible without a markdown engine. An empty description
+// yields an empty string so callers can omit the block.
+export function renderDescription(description) {
+  if (!description) return "";
+  return description
+    .split("\n")
+    .map((line) => {
+      const safe = esc(line);
+      const m = line.match(descHeading);
+      // Bold only the heading label (up to and including the colon); the escaped
+      // remainder of the line follows in normal weight.
+      if (m) {
+        const label = esc(m[0]);
+        return `<b>${label}</b>${safe.slice(label.length)}`;
+      }
+      return safe;
+    })
+    .join("<br>");
+}

@@ -203,10 +203,10 @@ type preferences struct {
 	Color     string `json:"color"`
 }
 
-func (c *daemonClient) createSession(ctx context.Context, description, cwd string) (createSessionResult, error) {
+func (c *daemonClient) createSession(ctx context.Context, title, description, cwd string) (createSessionResult, error) {
 	var out createSessionResult
 	err := c.call(ctx, http.MethodPost, "/api/sessions", map[string]any{
-		"description": description, "cwd": cwd,
+		"title": title, "description": description, "cwd": cwd,
 	}, &out)
 	return out, err
 }

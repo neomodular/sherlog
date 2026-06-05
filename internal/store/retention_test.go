@@ -11,7 +11,7 @@ import (
 // removed from memory and disk and reported, with a 30-day window.
 func TestPruneOldClosedSession(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, err := s.CreateSession("old bug", "/tmp/a")
+	sess, _, err := s.CreateSession("", "old bug", "/tmp/a")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestPruneOldClosedSession(t *testing.T) {
 // "Open session immune"): an open session older than the window is never pruned.
 func TestPruneOpenSessionImmune(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, err := s.CreateSession("long-open bug", "/tmp/b")
+	sess, _, err := s.CreateSession("", "long-open bug", "/tmp/b")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestPruneOpenSessionImmune(t *testing.T) {
 // TestPruneKeepsRecentlyClosed confirms a closed session inside the window is kept.
 func TestPruneKeepsRecentlyClosed(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, err := s.CreateSession("recent bug", "/tmp/c")
+	sess, _, err := s.CreateSession("", "recent bug", "/tmp/c")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}

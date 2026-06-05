@@ -35,7 +35,15 @@ const (
 // registry, and run history so the investigation survives context death and is
 // reconstructable by debug_resume (D5, D6).
 type Session struct {
-	ID          string       `json:"id"`          // short random base36 token (D4)
+	ID string `json:"id"` // short random base36 token (D4)
+	// Title is a short, scannable case identity shown wherever a case is referenced
+	// — lists, detail header, banner, recall, resume (add-case-titles D1/D3). It is
+	// agent-authored at debug_start; an empty stored title (legacy state files, or a
+	// caller that omitted it) is filled at read time by deriving a word-boundary
+	// truncation of the description, so every payload always carries a non-empty
+	// title. Additive and backward compatible: pre-title state files load with it
+	// blank and are never rewritten (Migration Plan).
+	Title       string       `json:"title,omitempty"`
 	Description string       `json:"description"` // the bug being investigated
 	CWD         string       `json:"cwd"`         // enables same-cwd open-session detection
 	CreatedAt   time.Time    `json:"created_at"`

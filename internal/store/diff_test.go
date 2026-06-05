@@ -22,7 +22,7 @@ func probeDiff(t *testing.T, d RunDiff, probe string) ProbeDiff {
 // samples, while a probe firing in both is reported unflagged.
 func TestDiffDifferentialDiagnosis(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("differential", "/repo")
+	sess, _, _ := s.CreateSession("", "differential", "/repo")
 
 	// Run 1 (reproduced): p1 and p2 fire.
 	r1, _ := s.OpenRun(sess.ID)
@@ -90,7 +90,7 @@ func TestDiffDifferentialDiagnosis(t *testing.T) {
 // in both runs but with a large count difference is flagged divergent.
 func TestDiffCountRatioDivergence(t *testing.T) {
 	s := newTestStore(t, WithFloodN(50))
-	sess, _, _ := s.CreateSession("ratio", "/repo")
+	sess, _, _ := s.CreateSession("", "ratio", "/repo")
 
 	r1, _ := s.OpenRun(sess.ID)
 	s.Ingest(sess.ID, "p1", nil, "x") // 1 hit
@@ -122,7 +122,7 @@ func TestDiffCountRatioDivergence(t *testing.T) {
 func TestDiffTruncationDisclosed(t *testing.T) {
 	const n = 3
 	s := newTestStore(t, WithFloodN(n))
-	sess, _, _ := s.CreateSession("trunc diff", "/repo")
+	sess, _, _ := s.CreateSession("", "trunc diff", "/repo")
 
 	r1, _ := s.OpenRun(sess.ID)
 	for i := 0; i < 100; i++ { // >> 2N, forces a dropped middle
@@ -155,8 +155,8 @@ func TestDiffTruncationDisclosed(t *testing.T) {
 // rejection cases: cross-session runs, unknown runs, same run, unknown session.
 func TestDiffInvalidPairs(t *testing.T) {
 	s := newTestStore(t)
-	a, _, _ := s.CreateSession("session a", "/repo/a")
-	b, _, _ := s.CreateSession("session b", "/repo/b")
+	a, _, _ := s.CreateSession("", "session a", "/repo/a")
+	b, _, _ := s.CreateSession("", "session b", "/repo/b")
 	ra1, _ := s.OpenRun(a.ID) // session a: only r1
 	rb1, _ := s.OpenRun(b.ID) // session b: r1
 	rb2, _ := s.OpenRun(b.ID) // session b: r2 — an ID absent from session a

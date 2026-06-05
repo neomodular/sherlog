@@ -104,6 +104,38 @@ func TestCaseBoardNoExternalURLs(t *testing.T) {
 	}
 }
 
+// TestCaseBoardRendersTitles guards the add-case-titles UI wiring: the list and
+// shared case header render the session title, the detail view renders the
+// soft-structured description, and the stale view shows the session title. These
+// are string checks against the embedded assets so a regression that reverts a view
+// to rendering the raw description (or drops the title) fails CI.
+func TestCaseBoardRendersTitles(t *testing.T) {
+	srv, _ := newTestServer(t)
+	checks := []struct {
+		path string
+		want []string
+	}{
+		// The list and header read s.title, not s.description.
+		{"/cases.js", []string{"s.title"}},
+		{"/diff.js", []string{"sess.title"}},
+		// Detail renders the description block via the soft-structure renderer.
+		{"/detail.js", []string{"renderDescription"}},
+		// render.js bolds the soft-structure headings and exports the renderer.
+		{"/render.js", []string{"renderDescription", "Symptom", "Expected", "Repro", "Context"}},
+		// Stale rows identify the case by title.
+		{"/stale.js", []string{"session_title"}},
+	}
+	for _, c := range checks {
+		w := do(srv, http.MethodGet, c.path, "")
+		body := readBody(t, w)
+		for _, want := range c.want {
+			if !strings.Contains(body, want) {
+				t.Errorf("asset %s missing %q (title wiring regressed)", c.path, want)
+			}
+		}
+	}
+}
+
 // readBody drains a recorder's body to a string for content assertions.
 func readBody(t *testing.T, w *httptest.ResponseRecorder) string {
 	t.Helper()

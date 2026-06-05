@@ -2,11 +2,12 @@ package store
 
 import "testing"
 
-// closeSolved is a test helper: create a session, optionally set a confirmed
-// hypothesis, then close it with the given resolution so recall can match it.
-func closeSolved(t *testing.T, s *Store, desc, cwd string, res *Resolution) string {
+// closeSolved is a test helper: create a session (with an optional title),
+// optionally set a confirmed hypothesis, then close it with the given resolution
+// so recall can match it.
+func closeSolved(t *testing.T, s *Store, title, desc, cwd string, res *Resolution) string {
 	t.Helper()
-	sess, _, err := s.CreateSession(desc, cwd)
+	sess, _, err := s.CreateSession(title, desc, cwd)
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -28,7 +29,7 @@ func closeSolved(t *testing.T, s *Store, desc, cwd string, res *Resolution) stri
 // its root cause and fix summary.
 func TestRecallSimilarCaseFound(t *testing.T) {
 	s := newTestStore(t)
-	id := closeSolved(t, s, "auth breaks sometimes", "/repo/auth", &Resolution{
+	id := closeSolved(t, s, "", "auth breaks sometimes", "/repo/auth", &Resolution{
 		RootCause:  "token refresh race after idle timeout",
 		FixSummary: "serialize refresh with a mutex",
 	})
@@ -57,10 +58,10 @@ func TestRecallSimilarCaseFound(t *testing.T) {
 // matches padded to fill three slots.
 func TestRecallNothingRelevant(t *testing.T) {
 	s := newTestStore(t)
-	closeSolved(t, s, "memory leak in renderer", "/repo/a", &Resolution{
+	closeSolved(t, s, "", "memory leak in renderer", "/repo/a", &Resolution{
 		RootCause: "unbounded cache growth in the paint loop",
 	})
-	closeSolved(t, s, "slow startup", "/repo/b", &Resolution{
+	closeSolved(t, s, "", "slow startup", "/repo/b", &Resolution{
 		RootCause: "synchronous disk scan blocks boot",
 	})
 
@@ -77,11 +78,11 @@ func TestRecallExcludesOpenAndUnsolved(t *testing.T) {
 	s := newTestStore(t)
 
 	// Open session whose description overlaps the query — must be excluded.
-	if _, _, err := s.CreateSession("token refresh race after idle", "/repo/open"); err != nil {
+	if _, _, err := s.CreateSession("", "token refresh race after idle", "/repo/open"); err != nil {
 		t.Fatalf("create open: %v", err)
 	}
 	// Closed-unsolved session with overlapping description — must be excluded.
-	unsolved, _, _ := s.CreateSession("token refresh race after idle", "/repo/unsolved")
+	unsolved, _, _ := s.CreateSession("", "token refresh race after idle", "/repo/unsolved")
 	if _, err := s.CloseSession(unsolved.ID); err != nil {
 		t.Fatalf("close unsolved: %v", err)
 	}
@@ -100,10 +101,10 @@ func TestRecallTopThreeRanked(t *testing.T) {
 	// Each case shares the query term "deadlock" a different number of times, so
 	// weighted TF overlap ranks them strong > medium > weak, and a fifth case with
 	// a single overlap is dropped after the top three.
-	closeSolved(t, s, "deadlock deadlock deadlock everywhere", "/repo/strong", &Resolution{RootCause: "deadlock on lock ordering"})
-	closeSolved(t, s, "deadlock deadlock seen twice", "/repo/medium", &Resolution{RootCause: "deadlock in pool"})
-	closeSolved(t, s, "deadlock observed once", "/repo/weak", &Resolution{RootCause: "lock held too long"})
-	closeSolved(t, s, "deadlock barely", "/repo/weakest", &Resolution{RootCause: "minor"})
+	closeSolved(t, s, "", "deadlock deadlock deadlock everywhere", "/repo/strong", &Resolution{RootCause: "deadlock on lock ordering"})
+	closeSolved(t, s, "", "deadlock deadlock seen twice", "/repo/medium", &Resolution{RootCause: "deadlock in pool"})
+	closeSolved(t, s, "", "deadlock observed once", "/repo/weak", &Resolution{RootCause: "lock held too long"})
+	closeSolved(t, s, "", "deadlock barely", "/repo/weakest", &Resolution{RootCause: "minor"})
 
 	matches := s.Recall("deadlock")
 	if len(matches) != recallMaxResults {
@@ -125,7 +126,7 @@ func TestRecallTopThreeRanked(t *testing.T) {
 // overlapping only that statement still matches.
 func TestRecallMatchesConfirmedHypothesisStatement(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("vague symptom", "/repo")
+	sess, _, _ := s.CreateSession("", "vague symptom", "/repo")
 	s.SetHypotheses(sess.ID, []string{"connection pool exhaustion under burst load"})
 	s.UpdateHypothesis(sess.ID, "h1", HypothesisConfirmed, "confirmed by p2")
 	if _, err := s.CloseSessionWithResolution(sess.ID, &Resolution{
@@ -145,7 +146,7 @@ func TestRecallMatchesConfirmedHypothesisStatement(t *testing.T) {
 // rather than matching everything.
 func TestRecallEmptyQuery(t *testing.T) {
 	s := newTestStore(t)
-	closeSolved(t, s, "some closed bug", "/repo", &Resolution{RootCause: "a cause here"})
+	closeSolved(t, s, "", "some closed bug", "/repo", &Resolution{RootCause: "a cause here"})
 	if m := s.Recall("the and for a"); len(m) != 0 {
 		t.Errorf("all-stopword query should match nothing, got %+v", m)
 	}

@@ -26,7 +26,7 @@ func recvEvent(t *testing.T, sub Subscription) Event {
 // board (set + update), probe (register + remove), run (open + close), log (ingest).
 func TestSubscribeReceivesAllKinds(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("events", "/repo")
+	sess, _, _ := s.CreateSession("", "events", "/repo")
 
 	sub := s.Subscribe()
 	defer sub.Unsubscribe()
@@ -63,7 +63,7 @@ func TestSubscribeReceivesAllKinds(t *testing.T) {
 // (the case left the open set) exactly once — the idempotent re-close is silent.
 func TestCloseSessionPublishesRunEvent(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("close pub", "/repo")
+	sess, _, _ := s.CreateSession("", "close pub", "/repo")
 	sub := s.Subscribe()
 	defer sub.Unsubscribe()
 
@@ -88,7 +88,7 @@ func TestCloseSessionPublishesRunEvent(t *testing.T) {
 // subscriber keeps receiving.
 func TestStalledSubscriberDropped(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("stall", "/repo")
+	sess, _, _ := s.CreateSession("", "stall", "/repo")
 
 	slow := s.Subscribe() // never drained
 	fast := s.Subscribe()
@@ -135,7 +135,7 @@ func TestStalledSubscriberDropped(t *testing.T) {
 // further delivery, and is safe to call twice (no double-close panic).
 func TestUnsubscribeIdempotentAndStops(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("unsub", "/repo")
+	sess, _, _ := s.CreateSession("", "unsub", "/repo")
 	sub := s.Subscribe()
 
 	sub.Unsubscribe()
@@ -159,7 +159,7 @@ func TestUnsubscribeIdempotentAndStops(t *testing.T) {
 // publisher ever blocks or panics. Subscribers drain continuously so none stall.
 func TestConcurrentPublishAndSubscribe(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("concurrent pub", "/repo")
+	sess, _, _ := s.CreateSession("", "concurrent pub", "/repo")
 	s.OpenRun(sess.ID)
 
 	var wg sync.WaitGroup

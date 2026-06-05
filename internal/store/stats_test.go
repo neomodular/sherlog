@@ -13,7 +13,7 @@ func TestStatsCountersUnderIngest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	sess, _, err := st.CreateSession("bug", "/tmp/app")
+	sess, _, err := st.CreateSession("", "bug", "/tmp/app")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -93,8 +93,8 @@ func TestStatsOpenRunSelection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	older, _, _ := st.CreateSession("older", "/a")
-	newer, _, _ := st.CreateSession("newer", "/b")
+	older, _, _ := st.CreateSession("", "older", "/a")
+	newer, _, _ := st.CreateSession("", "newer", "/b")
 	if _, err := st.OpenRun(older.ID); err != nil {
 		t.Fatalf("OpenRun older: %v", err)
 	}

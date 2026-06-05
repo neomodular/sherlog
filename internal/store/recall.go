@@ -21,7 +21,11 @@ const recallMinScore = 1.0
 // lead — id, the old description, and the recorded resolution — plus the score so
 // a caller can rank or display confidence.
 type RecallMatch struct {
-	SessionID   string  `json:"session_id"`
+	SessionID string `json:"session_id"`
+	// Title identifies the recalled case so the skill cites it by name rather than
+	// by a paragraph of description (add-case-titles D5). Always non-empty: a
+	// title-less legacy case carries its description-derived fallback.
+	Title       string  `json:"title"`
 	Description string  `json:"description"`
 	RootCause   string  `json:"root_cause,omitempty"`
 	FixSummary  string  `json:"fix_summary,omitempty"`
@@ -61,6 +65,7 @@ func (s *Store) Recall(query string) []RecallMatch {
 		}
 		matches = append(matches, RecallMatch{
 			SessionID:   id,
+			Title:       effectiveTitle(sess),
 			Description: sess.Description,
 			RootCause:   sess.Resolution.RootCause,
 			FixSummary:  sess.Resolution.FixSummary,
@@ -82,11 +87,13 @@ func (s *Store) Recall(query string) []RecallMatch {
 }
 
 // searchableText is the corpus recall scores a closed case against (design D5):
-// its bug description, recorded root cause, and the confirmed hypothesis's
-// statement when one is identified. Joined with spaces so tokenization sees them
-// as one bag of words.
+// its title, bug description, recorded root cause, and the confirmed hypothesis's
+// statement when one is identified. The title joins the corpus because titles are
+// short, high-signal tokens (add-case-titles D5); effectiveTitle is used so a
+// title-less legacy case still contributes its derived summary. Joined with spaces
+// so tokenization sees them as one bag of words.
 func searchableText(sess *Session) string {
-	parts := []string{sess.Description}
+	parts := []string{effectiveTitle(sess), sess.Description}
 	if sess.Resolution != nil {
 		parts = append(parts, sess.Resolution.RootCause)
 		if id := sess.Resolution.ConfirmedHypothesisID; id != "" {

@@ -16,7 +16,7 @@ func TestResolutionPersistsAndSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New s1: %v", err)
 	}
-	sess, _, _ := s1.CreateSession("discount totals wrong", "/repo")
+	sess, _, _ := s1.CreateSession("", "discount totals wrong", "/repo")
 	s1.SetHypotheses(sess.ID, []string{"float rounding", "cache stale"})
 	s1.UpdateHypothesis(sess.ID, "h1", HypothesisConfirmed, "p1 showed .005 rounding")
 
@@ -74,7 +74,7 @@ func TestCloseUnsolvedHasNoResolution(t *testing.T) {
 	s := newTestStore(t)
 
 	// Plain CloseSession: no resolution.
-	a, _, _ := s.CreateSession("unsolved a", "/repo/a")
+	a, _, _ := s.CreateSession("", "unsolved a", "/repo/a")
 	if _, err := s.CloseSession(a.ID); err != nil {
 		t.Fatalf("CloseSession: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestCloseUnsolvedHasNoResolution(t *testing.T) {
 	}
 
 	// CloseSessionWithResolution with an all-empty resolution is also unsolved.
-	b, _, _ := s.CreateSession("unsolved b", "/repo/b")
+	b, _, _ := s.CreateSession("", "unsolved b", "/repo/b")
 	if _, err := s.CloseSessionWithResolution(b.ID, &Resolution{}); err != nil {
 		t.Fatalf("CloseSessionWithResolution empty: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestCloseUnsolvedHasNoResolution(t *testing.T) {
 // the recorded resolution (CloseSession delegates to the resolution path).
 func TestCloseResolutionIdempotent(t *testing.T) {
 	s := newTestStore(t)
-	sess, _, _ := s.CreateSession("idempotent", "/repo")
+	sess, _, _ := s.CreateSession("", "idempotent", "/repo")
 	if _, err := s.CloseSessionWithResolution(sess.ID, &Resolution{RootCause: "first"}); err != nil {
 		t.Fatalf("first close: %v", err)
 	}

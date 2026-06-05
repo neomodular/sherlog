@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -191,11 +192,15 @@ func (s *Store) Root() string { return s.root }
 
 // --- Session lifecycle (spec: Session lifecycle) ---
 
-// CreateSession opens a new investigation for the given bug description and cwd.
-// The ID is a fresh random base36 token (D4). If another open session already
-// exists for the same cwd it is returned so the caller can warn the user; the new
-// session is still created (concurrent sessions are allowed, D-risks).
-func (s *Store) CreateSession(description, cwd string) (created *Session, existingSameCWD *Session, err error) {
+// CreateSession opens a new investigation for the given title, bug description,
+// and cwd. The ID is a fresh random base36 token (D4). The title is the agent-
+// authored case identity (add-case-titles D1); an empty title is left empty in
+// storage and derived from the description at read time (effectiveTitle), so an
+// older caller that omits it still yields a non-empty title in every payload
+// without a migration write. If another open session already exists for the same
+// cwd it is returned so the caller can warn the user; the new session is still
+// created (concurrent sessions are allowed, D-risks).
+func (s *Store) CreateSession(title, description, cwd string) (created *Session, existingSameCWD *Session, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -210,6 +215,7 @@ func (s *Store) CreateSession(description, cwd string) (created *Session, existi
 
 	sess := &Session{
 		ID:          id,
+		Title:       strings.TrimSpace(title),
 		Description: description,
 		CWD:         cwd,
 		CreatedAt:   time.Now().UTC(),
@@ -490,9 +496,14 @@ func (s *Store) RemoveProbe(sessionID, probeID string) error {
 var ErrProbeNotFound = errors.New("probe not found")
 
 // StaleProbe is an unremoved probe across any session, for `sherlog probes --stale` (D10).
+// SessionTitle carries the owning case's title so the Case Board's stale-probes
+// rows identify the case by name, not bare ID (add-case-titles: case references
+// show the title). Always non-empty — a title-less legacy case carries its derived
+// fallback.
 type StaleProbe struct {
-	SessionID string `json:"session_id"`
-	Probe     Probe  `json:"probe"`
+	SessionID    string `json:"session_id"`
+	SessionTitle string `json:"session_title"`
+	Probe        Probe  `json:"probe"`
 }
 
 // StaleProbes lists every registered-but-not-removed probe across all sessions,
@@ -504,9 +515,10 @@ func (s *Store) StaleProbes() []StaleProbe {
 
 	var out []StaleProbe
 	for id, entry := range s.sessions {
+		title := effectiveTitle(entry.session)
 		for _, p := range entry.session.Probes {
 			if !p.Removed {
-				out = append(out, StaleProbe{SessionID: id, Probe: p})
+				out = append(out, StaleProbe{SessionID: id, SessionTitle: title, Probe: p})
 			}
 		}
 	}
@@ -1009,6 +1021,11 @@ func maxRunNumber(runs []Run) int {
 
 func cloneSession(in *Session) *Session {
 	out := *in
+	// Fill the title at the single read boundary so every payload carries a
+	// non-empty title without rewriting legacy state files (design D1/D3): a
+	// title-less session gets its description-derived fallback here, the stored
+	// record stays untouched.
+	out.Title = effectiveTitle(in)
 	if in.ClosedAt != nil {
 		t := *in.ClosedAt
 		out.ClosedAt = &t

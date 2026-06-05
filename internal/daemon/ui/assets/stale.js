@@ -19,13 +19,19 @@ export async function renderStale(view) {
     view.innerHTML = `<h1>Stale probes</h1><p class="empty">No leftover probes — every registered probe is marked removed.</p>`;
     return;
   }
+  // Each row identifies its owning case by title (add-case-titles: case references
+  // show the title), linking to the case detail. The daemon always sends a non-empty
+  // session_title (real or derived); the #id stays as a small monospace tag so a
+  // case is still locatable by ID.
   const rows = stale
     .map(
       (sp) => `
       <tr>
         <td>${loc(sp.probe.file, sp.probe.line)}</td>
         <td><span class="pid">${esc(sp.probe.id)}</span></td>
-        <td><a href="#/case/${encodeURIComponent(sp.session_id)}">#${esc(sp.session_id)}</a></td>
+        <td><a href="#/case/${encodeURIComponent(sp.session_id)}">${esc(
+        sp.session_title || sp.session_id
+      )}</a> <span class="pid">#${esc(sp.session_id)}</span></td>
         <td>${esc(sp.probe.hypothesis_id || "—")}</td>
         <td>${esc(sp.probe.note || "")}</td>
       </tr>`

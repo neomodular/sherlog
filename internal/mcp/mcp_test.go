@@ -145,6 +145,11 @@ func TestEndToEnd(t *testing.T) {
 	if start.SessionID == "" {
 		t.Fatal("debug_start: empty session ID")
 	}
+	// Backward compatible: a caller that omits title still gets a non-empty echoed
+	// title — the daemon derives it from the description (mcp-server: Legacy caller).
+	if start.Title == "" {
+		t.Error("debug_start without a title must echo a derived fallback title")
+	}
 	if start.ProbeContract.OneLiners["js"] == "" || start.ProbeContract.OneLiners["curl"] == "" {
 		t.Fatalf("debug_start: missing probe one-liners: %+v", start.ProbeContract.OneLiners)
 	}
@@ -363,8 +368,13 @@ func TestCaseLifecycleRecallAndDiff(t *testing.T) {
 
 	// --- Case 1: solve it and record a resolution (recall material). ---
 	var first debugStartOut
-	callTool(t, ctx, sess, "debug_start",
-		map[string]any{"bug_description": "checkout total off by a cent on discounted carts"}, &first)
+	callTool(t, ctx, sess, "debug_start", map[string]any{
+		"title":           "Cart total off by a cent on discounts",
+		"bug_description": "checkout total off by a cent on discounted carts",
+	}, &first)
+	if first.Title != "Cart total off by a cent on discounts" {
+		t.Errorf("titled start should echo the title, got %q", first.Title)
+	}
 	if len(first.RelatedCases) != 0 {
 		t.Fatalf("first case should have no recall matches in an empty archive: %+v", first.RelatedCases)
 	}
@@ -399,6 +409,11 @@ func TestCaseLifecycleRecallAndDiff(t *testing.T) {
 	got := second.RelatedCases[0]
 	if got.SessionID != first.SessionID {
 		t.Errorf("recall top match = %q, want case 1 %q", got.SessionID, first.SessionID)
+	}
+	// The recalled case is identified by its title so the skill can cite it by name
+	// (case-recall: matches identified by title).
+	if got.Title != "Cart total off by a cent on discounts" {
+		t.Errorf("recall match should carry case 1's title, got %q", got.Title)
 	}
 	if got.RootCause != "float rounding in discount calc" || got.FixSummary != "switched discount math to integer cents" {
 		t.Errorf("recall match missing resolution fields: %+v", got)

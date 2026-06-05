@@ -40,7 +40,7 @@ func newTestServerAt(t *testing.T, root string) (*Server, *store.Store) {
 
 func mustSession(t *testing.T, st *store.Store) *store.Session {
 	t.Helper()
-	sess, _, err := st.CreateSession("bug", "/tmp/app")
+	sess, _, err := st.CreateSession("", "bug", "/tmp/app")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestAwaitAdoptsPreRunEvents(t *testing.T) {
 func TestAwaitAdoptsThenRestartReplaysSame(t *testing.T) {
 	root := t.TempDir()
 	srv, st := newTestServerAt(t, root)
-	sess, _, err := st.CreateSession("restart adopt", "/tmp/app")
+	sess, _, err := st.CreateSession("", "restart adopt", "/tmp/app")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestLoopbackListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	sess, _, _ := st.CreateSession("bug", "/tmp/app")
+	sess, _, _ := st.CreateSession("", "bug", "/tmp/app")
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

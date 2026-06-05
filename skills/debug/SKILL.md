@@ -37,8 +37,11 @@ gather context → debug_start → ≥3 suspects (set_hypotheses)
    files/area are involved. If the report is vague ("login is broken"), ask one
    or two sharp questions before starting — a good investigation needs a
    reproducible symptom.
-2. Call `debug_start(bug_description)`. It returns:
+2. **Author a title and a structured description** (rules below), then call
+   `debug_start(title, bug_description)`. It returns:
    - `session_id` — thread it through every later call.
+   - `title` — the case identity echoed back (the one you supplied, or a derived
+     fallback if you omitted it). Use it in the banner and whenever you name the case.
    - `probe_contract` — the `url_template` (`http://127.0.0.1:2218/log/<session>/<probe>`),
      a one-line `note`, and `one_liners` per language (js, python, go, ruby, curl).
    - `preferences` — `{verbosity, color}` for presentation (see "Presentation
@@ -51,6 +54,52 @@ gather context → debug_start → ≥3 suspects (set_hypotheses)
      from this bug's description (each with `session_id`, the old `description`,
      `root_cause`, and `fix_summary`). They are **leads, not evidence** — use them
      per "Recalled cases as leads" below.
+
+### Authoring the title and description (binding)
+
+`debug_start` takes a **title** and a **bug_description**. You write both.
+
+**Title** — the case identity shown everywhere a case is referenced (Case Board
+list, banner, recall results, resume). Make it:
+
+- A short, specific summary of the *failure*, **≤ 60 characters**.
+- Imperative or noun-phrase, naming the observed problem — not the whole story.
+
+> ✅ `Login 401 after idle timeout`
+> ✅ `Cart total off by a cent on discounts`
+> ✅ `Race between token refresh and request`
+> ❌ `Bug in auth` (vague — which bug?)
+> ❌ `The login endpoint sometimes returns a 401 error after the user has been
+>    idle for a while and the token expires` (that's the description, not a title)
+
+If you genuinely cannot name the failure yet (the symptom is still unclear), ask
+your one clarifying question first (below), then title it. The daemon will derive a
+truncated fallback if you omit the title, but a derived paragraph-stub is worse than
+a real title — **always supply one.**
+
+**Description** — the detailed narrative, written as plain text under *soft-
+structured* headings. Include only the headings you have **real content** for:
+
+```
+Symptom: 401 on the first request after the tab sits idle ~5 min. Exact error:
+  "token_expired" from /api/me.
+Expected: silent token refresh keeps the session alive; no 401.
+Repro: log in, leave the tab idle 5+ min, click anything that calls the API.
+Context: started after the 2.3 auth refactor; only Safari reported so far.
+```
+
+Binding rules for the description:
+
+- **Quote exact error text** in `Symptom:` when you have it — it is the highest-
+  signal recall token.
+- **Never invent** an `Expected:` or `Repro:` the user did not state. Omit a heading
+  rather than fabricate its content — a missing heading is honest; a made-up one
+  misleads the next investigator.
+- **One clarifying question, max.** Ask **only** when the *symptom or expected
+  behavior is genuinely unclear* (you cannot tell what actually goes wrong).
+  Otherwise proceed with what you have — partial structure is fine.
+- Headings are plain text, not a schema: the Case Board bolds the `Symptom:` /
+  `Expected:` / `Repro:` / `Context:` labels on render, but storage is one string.
 
 ### Recalled cases as leads (never evidence)
 
@@ -304,11 +353,12 @@ not part of the case.
 When invoked as resume (or any time you've lost the thread):
 
 1. `debug_resume(session_id?)` — omit the ID for the latest open session, or pass
-   a specific one. It returns the full `Session`: `description`, the hypothesis
-   board (`hypotheses` with `status` + `note`), the probe registry (`probes` with
-   `file`/`line`/`removed`), and `runs` (with `verdict`s).
-2. **Restate from the board, not from memory**: the bug, the surviving (`active`)
-   suspects, where the live probes are, and what the runs concluded.
+   a specific one. It returns the full `Session`: `title`, `description`, the
+   hypothesis board (`hypotheses` with `status` + `note`), the probe registry
+   (`probes` with `file`/`line`/`removed`), and `runs` (with `verdict`s).
+2. **Restate from the board, not from memory**: the case `title`, the bug, the
+   surviving (`active`) suspects, where the live probes are, and what the runs
+   concluded.
 3. Continue at the right stage: still gathering evidence → another `await_run`;
    one suspect confirmed → fix; fix applied → fixed-check; everything verified →
    cleanup gate. Pick up exactly where the board left off.
@@ -332,7 +382,7 @@ cleanup gate. Verbosity changes how you *say* things, not what you *do*.
 - **`minimal`** — drop all of it. **No sprite art, no detective phrases**, no
   flourish. Print plain status lines instead:
   - In place of the banner: a one-line state plus the Case Board link once, e.g.
-    `sherlog · case #<id> · N suspects · M probes · port <port>` followed by
+    `sherlog · <title> · #<id> · N suspects · M probes · port <port>` followed by
     `Case Board: http://127.0.0.1:<port>`.
   - In place of "the game is afoot": `Reproduce the bug now; waiting…`
   - In place of "elementary.": `Root cause confirmed: <hN> (<evidence>).`
@@ -388,13 +438,13 @@ the exact same sprite with no escape codes. Never substitute different glyphs.
 **Status line** (immediately under the sprite), exactly this shape:
 
 ```
-sherlog · case #<id> · N suspects · M probes · watching :2218
+sherlog · <title> · #<id> · N suspects · M probes · watching :2218
 Case Board: http://127.0.0.1:2218 — watch the investigation live
 ```
 
-`<id>` is the `session_id`; `N` = active suspects on the board; `M` = registered
-probes not yet removed; the port is the daemon's (use the actual port if
-`SHERLOG_PORT` is set). The **Case Board** is the read-only browser UI the daemon
+`<title>` is the case title from `debug_start`; `<id>` is the `session_id`; `N` =
+active suspects on the board; `M` = registered probes not yet removed; the port is
+the daemon's (use the actual port if `SHERLOG_PORT` is set). The **Case Board** is the read-only browser UI the daemon
 serves — include its URL **once**, here in the opening banner (use the actual port
 if `SHERLOG_PORT` is set), so the user can watch evidence stream in while they
 reproduce. Do not repeat the link at later transitions.
@@ -410,6 +460,7 @@ else):
 
 ## Discipline checklist
 
+- [ ] `debug_start` given a specific ≤60-char title and a soft-structured description (Symptom/Expected/Repro/Context — only real content, exact errors quoted, nothing fabricated).
 - [ ] ≥3 distinct suspects on the board before any probe.
 - [ ] ≥1 *discriminating* probe per suspect, each `register_probe`'d with file+line+hypothesis.
 - [ ] Probes: one line, fire-and-forget, no JSON content-type, no new imports/wrappers.

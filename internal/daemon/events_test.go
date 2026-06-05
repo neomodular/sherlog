@@ -95,7 +95,7 @@ func readSSEEvent(t *testing.T, r *bufio.Reader, deadline time.Duration) (event,
 // typed `log` event over the SSE stream without a reload.
 func TestSSEDeliveryDuringIngest(t *testing.T) {
 	base, st := liveServer(t)
-	sess, _, err := st.CreateSession("bug", "/tmp/app")
+	sess, _, err := st.CreateSession("", "bug", "/tmp/app")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -126,8 +126,8 @@ func TestSSEDeliveryDuringIngest(t *testing.T) {
 // session never receives another session's events.
 func TestSSEOnlyOwnSession(t *testing.T) {
 	base, st := liveServer(t)
-	a, _, _ := st.CreateSession("bug a", "/tmp/a")
-	b, _, _ := st.CreateSession("bug b", "/tmp/b")
+	a, _, _ := st.CreateSession("", "bug a", "/tmp/a")
+	b, _, _ := st.CreateSession("", "bug b", "/tmp/b")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -153,7 +153,7 @@ func TestSSEOnlyOwnSession(t *testing.T) {
 // publisher.
 func TestSSEStalledSubscriberDropped(t *testing.T) {
 	base, st := liveServer(t)
-	sess, _, _ := st.CreateSession("bug", "/tmp/app")
+	sess, _, _ := st.CreateSession("", "bug", "/tmp/app")
 
 	// Stalled subscriber: connect, then never read its body.
 	stallCtx, stallCancel := context.WithCancel(context.Background())

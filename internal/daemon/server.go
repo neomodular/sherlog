@@ -227,13 +227,17 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		Title       string `json:"title"`
 		Description string `json:"description"`
 		CWD         string `json:"cwd"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	created, existing, err := s.store.CreateSession(req.Description, req.CWD)
+	// An omitted title is left empty here; the store derives a fallback from the
+	// description at read time so the response always carries a non-empty title
+	// (add-case-titles D1, backward compatible).
+	created, existing, err := s.store.CreateSession(req.Title, req.Description, req.CWD)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
