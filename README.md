@@ -32,12 +32,28 @@ sherlog has two parts that version together: the binary and the Claude Code
 plugin. **Install the binary first** — the plugin's MCP server launches `sherlog`
 from your PATH.
 
-1. **Binary** (Homebrew, macOS/Linux):
+1. **Binary**
+
+   macOS / Linux (Homebrew):
 
    ```sh
    brew install neomodular/tap/sherlog
    sherlog --version
    ```
+
+   Windows: download the `sherlog_<version>_windows_amd64.zip` (or `arm64`)
+   from the [latest release](https://github.com/neomodular/sherlog/releases/latest),
+   unzip it, and put `sherlog.exe` somewhere on your `PATH` — for example:
+
+   ```powershell
+   Expand-Archive sherlog_*_windows_amd64.zip -DestinationPath "$env:LOCALAPPDATA\sherlog"
+   # add it to PATH for future shells:
+   [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:LOCALAPPDATA\sherlog", "User")
+   sherlog --version
+   ```
+
+   (winget support is in progress — once `neomodular.sherlog` is merged into
+   the community repo, this becomes `winget install neomodular.sherlog`.)
 
 2. **Plugin** (Claude Code): inside any Claude Code session, run:
 
@@ -51,9 +67,8 @@ from your PATH.
    `/debug` is available with no further configuration.
 
 If the plugin's MCP server fails to start, the binary is almost certainly not on
-PATH — re-run the `brew install` above, or see
-[docs/troubleshooting.md](docs/troubleshooting.md). (Windows is supported for
-`go build` development but is not yet packaged.)
+PATH — re-run the install step above, or see
+[docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## 60-second tour
 

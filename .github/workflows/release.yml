@@ -1,7 +1,9 @@
 name: Release
 
-# Tagging v* drives a full release: goreleaser builds the four targets, cuts a
-# GitHub release, and pushes the Homebrew formula to neomodular/homebrew-tap
+# Tagging v* drives a full release: goreleaser builds the six targets
+# (darwin/linux/windows × arm64/amd64), cuts a GitHub release, pushes the
+# Homebrew formula to neomodular/homebrew-tap, and opens a winget manifest PR
+# against microsoft/winget-pkgs from the neomodular/winget-pkgs fork
 # (tasks 7.2, 7.3).
 on:
   push:
@@ -40,5 +42,7 @@ jobs:
           # PAT with repo scope on neomodular/homebrew-tap so goreleaser can push
           # the updated formula across repositories. Create it at
           # Settings → Developer settings → Personal access tokens, then add it
-          # to this repo as the TAP_GITHUB_TOKEN secret.
+          # to this repo as the TAP_GITHUB_TOKEN secret. The same token also
+          # pushes the winget manifest to the neomodular/winget-pkgs fork and
+          # opens the PR against microsoft/winget-pkgs (needs public_repo).
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}

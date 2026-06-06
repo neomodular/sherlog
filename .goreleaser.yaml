@@ -1,12 +1,14 @@
 # goreleaser config for sherlog (task 7.1/7.2).
-# One config drives all four targets and the Homebrew tap (D1, D14).
+# One config drives all six targets (darwin/linux/windows × arm64/amd64), the
+# Homebrew tap, and the winget manifest (D1, D14).
 #
 # Validate locally with: goreleaser release --clean --snapshot --skip=publish
 # Do NOT gate on `goreleaser check`: it exits non-zero on the deliberately
 # retained `brews` block (deprecation, not an error of substance — see the
 # `brews:` comment below). The release pipeline runs only `release --clean`
 # against the pinned v2.16.0, which exits 0 and emits the correct 4-target tap
-# formula; the standalone `check` failure is expected and waived.
+# formula (the tap stays darwin/linux-only; windows ships via release zips and
+# winget); the standalone `check` failure is expected and waived.
 version: 2
 
 project_name: sherlog
@@ -33,6 +35,7 @@ builds:
     goos:
       - darwin
       - linux
+      - windows
     goarch:
       - arm64
       - amd64
@@ -40,6 +43,11 @@ builds:
 archives:
   - id: sherlog
     formats: [tar.gz]
+    # winget requires zip archives for its zip/portable nested installer type,
+    # and zip is the native expectation on Windows anyway.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     files:
@@ -84,6 +92,41 @@ brews:
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     homepage: "https://github.com/neomodular/sherlog"
     description: "Hypothesis-driven debugging for Claude Code — the /debug detective loop over a localhost daemon on :2218"
+
+# winget publication. goreleaser generates the manifest (zip installer with a
+# nested portable exe), pushes it to the neomodular/winget-pkgs fork, and opens
+# a PR against microsoft/winget-pkgs.
+#
+# Prerequisites before tagging a release with this block active:
+#   1. Fork https://github.com/microsoft/winget-pkgs to the neomodular account
+#      (goreleaser pushes the manifest branch there).
+#   2. TAP_GITHUB_TOKEN must be a classic PAT with `public_repo` scope so it can
+#      push to the fork and open the upstream PR (the same token already pushes
+#      the Homebrew formula).
+# New-package PRs go through microsoft/winget-pkgs moderation (typically a few
+# days). Until it merges, Windows users install from the GitHub release zip.
+winget:
+  - name: sherlog
+    publisher: neomodular
+    package_identifier: neomodular.sherlog
+    short_description: "Hypothesis-driven debugging for Claude Code"
+    license: "MIT"
+    homepage: "https://github.com/neomodular/sherlog"
+    publisher_url: "https://github.com/neomodular"
+    publisher_support_url: "https://github.com/neomodular/sherlog/issues"
+    release_notes_url: "https://github.com/neomodular/sherlog/releases/tag/{{ .Tag }}"
+    repository:
+      owner: neomodular
+      name: winget-pkgs
+      branch: "sherlog-{{ .Version }}"
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+      pull_request:
+        enabled: true
+        draft: false
+        base:
+          owner: microsoft
+          name: winget-pkgs
+          branch: master
 
 release:
   github:
