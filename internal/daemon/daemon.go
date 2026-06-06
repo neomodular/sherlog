@@ -5,6 +5,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -20,6 +21,13 @@ import (
 // lines instantly recognizable in diffs. It mirrors config.DefaultPort so other
 // packages (the MCP client) can reference the brand port without importing config.
 const DefaultPort = config.DefaultPort
+
+// shutdownDrainBudget bounds the graceful drain after POST /api/shutdown
+// (daemon-self-heal-on-upgrade D3). It must stay short: await_run long-polls can
+// hold connections for minutes, and srv.Shutdown waits for them — after the
+// budget the server is hard-closed, which is safe because all investigation
+// state is persisted at write time (MVP D5/D6).
+const shutdownDrainBudget = 2 * time.Second
 
 // Run starts the daemon and blocks until the HTTP server exits. Configuration is
 // resolved once (env > file > default, add-config) and drives the port, the store
@@ -67,9 +75,28 @@ func Run(version string) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	// Graceful stop on POST /api/shutdown (daemon-self-heal-on-upgrade D3): drain
+	// politely within the budget, then hard-close so a held await_run long-poll
+	// cannot stall the exit. Serve returns ErrServerClosed as soon as Shutdown is
+	// *called*, so Run must wait for the drain to finish before returning —
+	// otherwise the process could exit before the 200 ack flushes to the client.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		<-handler.ShutdownRequested()
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainBudget)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			_ = srv.Close()
+		}
+	}()
+
+	// Serve always returns non-nil: ErrServerClosed via the shutdown path above
+	// (wait for the drain, then exit 0), or a real serve failure (report it).
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("daemon: serve on %s: %w", addr, err)
 	}
+	<-drained
 	return nil
 }
 

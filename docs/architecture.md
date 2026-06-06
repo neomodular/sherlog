@@ -39,11 +39,22 @@ sherlog is a single Go binary that runs in two modes, plus a Claude Code plugin.
     trailing-hour events, live SSE subscribers, open run), the stale-probe count,
     and boolean self-checks (`storage_writable`, `loopback_only`). It is separate
     from `/health` so that contract stays O(1) and unchanged.
+  - `POST /api/shutdown` (internal, MCP-facing) is the graceful stop: it acks
+    `200 {"ok":true}`, drains in-flight requests for ~2 s, hard-closes whatever
+    remains (an `await_run` long-poll must not stall the exit — state is
+    persisted, the await is simply reissued), and the process exits 0. The Case
+    Board never calls it; the board stays strictly read-only.
 - **MCP server** (`sherlog mcp`) — the stdio MCP server the plugin launches. It
   holds no investigation state; every tool call routes to the daemon's `/api/`.
-  Before each call it ensures the daemon is up, auto-spawning a detached
-  `sherlog daemon` if nothing answers on the port. A foreign process on the port
-  produces an actionable error instead.
+  Before each call it ensures a daemon **of its own build** is up, auto-spawning
+  a detached `sherlog daemon` if nothing answers on the port. A foreign process
+  on the port produces an actionable error instead.
+  - **Upgrade self-heal**: the binary and plugin version together, so a daemon
+    whose `/health` version differs from the MCP's is always a stale leftover
+    from an upgrade (or downgrade). The ensure step replaces it transparently:
+    `POST /api/shutdown` → wait for the port to free → respawn → wait for
+    health. Daemons ≤ 0.4.0 predate the endpoint (404) and surface a one-time
+    actionable error naming the manual kill command instead.
 - **Store** — the in-memory source of truth inside the daemon, persisted to disk.
   The daemon owns all investigation state, which is what lets an investigation
   survive `/clear`, context compaction, a crash, or being resumed days later.

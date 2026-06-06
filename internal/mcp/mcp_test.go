@@ -55,6 +55,9 @@ func connectMCP(t *testing.T, ctx context.Context, base, port string) *mcpsdk.Cl
 		port:      port,
 		http:      &http.Client{Timeout: 10 * time.Second},
 		awaitHTTP: &http.Client{},
+		// Matches startTestDaemon's version so ensureDaemon treats the test daemon
+		// as current rather than stale (daemon-self-heal-on-upgrade).
+		version: "test",
 	}
 
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "sherlog", Version: "test"}, nil)
@@ -315,6 +318,12 @@ func TestReportObservationFireAndForget(t *testing.T) {
 		port:      port,
 		http:      &http.Client{Timeout: time.Second},
 		awaitHTTP: &http.Client{},
+		version:   "test",
+		// Stub the spawn: the real one would detach a copy of the *test binary* as
+		// a fake daemon (os.Executable under `go test`), leaking processes. A no-op
+		// spawn keeps the intended shape — the follow-up health wait still fails
+		// fast against the dead port, and the tool must swallow that.
+		spawn: func() error { return nil },
 	}
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "sherlog", Version: "test"}, nil)
 	registerTools(server, c)
@@ -329,10 +338,9 @@ func TestReportObservationFireAndForget(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sess.Close() })
 
-	// The auto-spawn path would normally try to launch `sherlog daemon`; in the
-	// test binary that exe is the test runner, so spawning is harmless and the
-	// follow-up health wait fails fast against the dead port. Either way the tool
-	// must NOT surface an error.
+	// The auto-spawn path runs (stubbed above) and the follow-up health wait
+	// fails fast against the dead port. Either way the tool must NOT surface an
+	// error.
 	res, err := sess.CallTool(ctx, &mcpsdk.CallToolParams{
 		Name: "report_observation",
 		Arguments: map[string]any{

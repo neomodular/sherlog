@@ -93,6 +93,9 @@ func TestEnsureDaemonHealthy(t *testing.T) {
 		port:      port,
 		http:      &http.Client{Timeout: time.Second},
 		awaitHTTP: &http.Client{},
+		// Same version as the stub: a healthy, current daemon is a no-op
+		// (daemon-self-heal-on-upgrade: same version is a no-op).
+		version: "test",
 	}
 	if err := c.ensureDaemon(context.Background()); err != nil {
 		t.Fatalf("ensureDaemon against healthy daemon: %v", err)

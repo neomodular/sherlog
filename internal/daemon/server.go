@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -54,6 +55,13 @@ type Server struct {
 	// under the health view's polling (add-health-page D2): a refreshing page must
 	// not re-walk the data directory every 5s.
 	disk diskUsageCache
+
+	// shutdown is closed (once) when POST /api/shutdown is acknowledged, telling
+	// Run to drain and stop the HTTP server (daemon-self-heal-on-upgrade D2/D3).
+	// The handler signals; Run owns the actual server stop, because only Run holds
+	// the *http.Server.
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 }
 
 // NewServer builds the Server and its route table over the given store, wiring the
@@ -70,6 +78,7 @@ func NewServer(s *store.Store, version string, cfg config.Effective) *Server {
 		started:  time.Now(),
 		mux:      http.NewServeMux(),
 		bindHost: "127.0.0.1", // the only host Run binds (D4); SetBindHost confirms it
+		shutdown: make(chan struct{}),
 	}
 	if n, err := notes.New(notes.WithRoot(s.Root())); err == nil {
 		srv.notes = n
@@ -98,6 +107,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/sessions/", s.handleSessionByID) // GET state, DELETE close, plus sub-resources
 	s.mux.HandleFunc("/api/notes", s.handleNotes)           // POST file a field note (field-notes D2)
 	s.mux.HandleFunc("/api/stats", s.handleStats)           // GET health aggregation (add-health-page D1)
+	s.mux.HandleFunc("/api/shutdown", s.handleShutdown)     // POST graceful stop (daemon-self-heal-on-upgrade)
 
 	// Browser-facing read surface for the Case Board (case-board-ui spec). Every
 	// route here is GET-only (design D2: the UI never gains a write path); the
@@ -602,6 +612,31 @@ func (s *Server) handleNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, n)
+}
+
+// --- Internal API: graceful shutdown (daemon-self-heal-on-upgrade) ---
+
+// handleShutdown acknowledges a graceful-stop request and signals Run to drain
+// and exit. POST-only on the internal /api/ surface — the Case Board never gains
+// a write path (case-board-ui design D2), so no board view or script calls this.
+// The 200 ack is written before the signal fires; the signal only starts the
+// drain, and srv.Shutdown waits for in-flight handlers (including this one), so
+// the client always receives its acknowledgement. Idempotent: a second POST
+// during the drain window acks again without re-signaling.
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	s.shutdownOnce.Do(func() { close(s.shutdown) })
+}
+
+// ShutdownRequested exposes the shutdown signal to Run, which owns the
+// *http.Server and performs the bounded drain (daemon-self-heal-on-upgrade D3).
+// The channel is closed exactly once, on the first acknowledged POST /api/shutdown.
+func (s *Server) ShutdownRequested() <-chan struct{} {
+	return s.shutdown
 }
 
 // --- shared helpers ---

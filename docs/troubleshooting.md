@@ -65,6 +65,43 @@ If sherlog is up, the app is rebuilt, and the URL matches but events still do no
 arrive, that is sherlog misbehaving — the skill may file a `report_observation`
 field note.
 
+## I upgraded sherlog but still see the old UI / old behavior
+
+The daemon is a long-lived background process with the Case Board embedded in
+its binary — upgrading the binary on disk does not touch the daemon that is
+already running.
+
+**From this release on, this fixes itself**: every tool call compares the
+daemon's version against the binary's and transparently restarts the daemon on
+mismatch. You only need a hard refresh in the browser (Cmd+Shift+R /
+Ctrl+Shift+R) to drop cached board assets.
+
+**One-time exception — the daemon you are replacing is ≤ 0.4.0.** Daemons that
+old predate the restart mechanism, so the first tool call after upgrading fails
+with instructions instead. Stop the old daemon once by hand:
+
+```sh
+pkill -f "sherlog daemon"          # macOS / Linux
+```
+
+```powershell
+Get-Process sherlog | Stop-Process  # Windows
+```
+
+The next tool call spawns the new daemon automatically, and every future
+upgrade self-heals without this step.
+
+To confirm what is actually serving, compare:
+
+```sh
+sherlog --version                       # the binary on disk
+curl -s http://127.0.0.1:2218/health    # the running daemon
+```
+
+> A restart that lands while another session is blocked in `await_run` cuts
+> that wait after a ~2 s drain. Nothing is lost — investigation state is
+> persisted — simply reissue the `await_run`.
+
 ## Port 2218 is already in use / "held by a process that is not the sherlog daemon"
 
 The daemon binds `127.0.0.1:2218` (221B Baker Street). When a tool call finds the

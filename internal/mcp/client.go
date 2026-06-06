@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -30,6 +32,14 @@ type daemonClient struct {
 	// awaitHTTP has no overall timeout: await_run long-polls for up to its
 	// requested duration, so a fixed client timeout would cut the wait short.
 	awaitHTTP *http.Client
+	// version is this process's build version; ensureDaemon compares it against
+	// the daemon's /health version and replaces a stale daemon on mismatch
+	// (daemon-self-heal-on-upgrade D1). The binary and plugin version together
+	// (MVP D14), so a mismatch is always an upgrade/downgrade artifact.
+	version string
+	// spawn overrides spawnDaemon in tests (the real spawn execs os.Executable,
+	// which under `go test` is the test binary). nil means spawnDaemon.
+	spawn func() error
 }
 
 // healthInfo is the daemon's /health payload; the version field is how the MCP
@@ -46,7 +56,7 @@ type healthInfo struct {
 // SHERLOG_PORT (design D2/D4). A config load failure falls back to the brand port
 // rather than blocking the MCP server from starting. It does not contact the
 // daemon.
-func newDaemonClient() *daemonClient {
+func newDaemonClient(version string) *daemonClient {
 	port := daemon.DefaultPort
 	if root, err := config.DefaultRoot(); err == nil {
 		if cfg, err := config.Load(root); err == nil {
@@ -58,6 +68,7 @@ func newDaemonClient() *daemonClient {
 		port:      port,
 		http:      &http.Client{Timeout: 10 * time.Second},
 		awaitHTTP: &http.Client{}, // no timeout: bounded by the request context
+		version:   version,
 	}
 }
 
@@ -68,15 +79,21 @@ func (c *daemonClient) probeURLTemplate(sessionID string) string {
 	return c.base + "/log/" + sessionID + "/<probe>"
 }
 
-// ensureDaemon guarantees a sherlog daemon is answering on the port, spawning one
-// detached if needed (D2). It distinguishes three states:
-//   - sherlog already listening      → nil
-//   - nothing listening              → spawn `sherlog daemon`, wait for /health
-//   - foreign process on the port    → error explaining SHERLOG_PORT (D4)
+// ensureDaemon guarantees a sherlog daemon *of this build* is answering on the
+// port, spawning one detached if needed (D2). It distinguishes four states:
+//   - sherlog listening, same version → nil
+//   - sherlog listening, other version → replace it (daemon-self-heal-on-upgrade)
+//   - nothing listening               → spawn `sherlog daemon`, wait for /health
+//   - foreign process on the port     → error explaining SHERLOG_PORT (D4)
 func (c *daemonClient) ensureDaemon(ctx context.Context) error {
 	switch info, err := c.health(ctx); {
+	case err == nil && info.Version == c.version && info.Version != "":
+		return nil // sherlog is up and current
 	case err == nil && info.Version != "":
-		return nil // sherlog is up
+		// A healthy sherlog from a different build — always an upgrade/downgrade
+		// artifact, since binary and plugin version together (MVP D14). Replace it
+		// so the user is never silently served a stale daemon.
+		return c.replaceStaleDaemon(ctx, info.Version)
 	case err == nil:
 		// Port answered /health but did not identify as sherlog. Treat any other
 		// listener as foreign — see portOccupiedByForeign for the non-/health case.
@@ -91,10 +108,106 @@ func (c *daemonClient) ensureDaemon(ctx context.Context) error {
 		return c.foreignPortError()
 	}
 
-	if err := c.spawnDaemon(); err != nil {
+	if err := c.doSpawn(); err != nil {
 		return fmt.Errorf("auto-spawn daemon: %w", err)
 	}
 	return c.waitForHealth(ctx)
+}
+
+// errShutdownUnsupported marks a daemon that predates POST /api/shutdown
+// (≤ 0.4.0): it answers the route with 404/405, so it cannot be replaced
+// automatically (daemon-self-heal-on-upgrade D4, legacy fallback).
+var errShutdownUnsupported = errors.New("daemon does not support /api/shutdown")
+
+// replaceStaleDaemon swaps a version-mismatched daemon for one of this build:
+// graceful shutdown → wait for the port to free → detached spawn → wait for
+// health (daemon-self-heal-on-upgrade D4). The spawned daemon is this process's
+// own executable, so the replacement always answers with c.version.
+//
+// Concurrent restarts converge without coordination: the loser's shutdown POST
+// sees a refused connection (treated as "already exiting"), its spawned child
+// exits on the bind conflict, and waitForHealth sees the winner's daemon.
+func (c *daemonClient) replaceStaleDaemon(ctx context.Context, daemonVersion string) error {
+	if err := c.postShutdown(ctx); err != nil {
+		if errors.Is(err, errShutdownUnsupported) {
+			return c.legacyDaemonError(daemonVersion)
+		}
+		// A transport error means the daemon dropped the connection — it is
+		// already exiting (e.g. a concurrent restart won the race); proceed.
+	}
+	if err := c.waitPortFree(ctx); err != nil {
+		return err
+	}
+	if err := c.doSpawn(); err != nil {
+		return fmt.Errorf("auto-spawn daemon: %w", err)
+	}
+	return c.waitForHealth(ctx)
+}
+
+// postShutdown asks the daemon to stop via POST /api/shutdown. A 2xx is success;
+// 404/405 identifies a pre-endpoint daemon (errShutdownUnsupported); a transport
+// error is returned as-is for the caller to treat as already-exiting.
+func (c *daemonClient) postShutdown(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/api/shutdown", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return nil
+	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed:
+		return errShutdownUnsupported
+	default:
+		return fmt.Errorf("daemon shutdown request failed: %s", resp.Status)
+	}
+}
+
+// legacyDaemonError is the one-time actionable error for daemons too old to know
+// the shutdown endpoint (≤ 0.4.0): name both versions and the exact manual stop
+// command for the platform (daemon-self-heal-on-upgrade, mcp-server spec).
+func (c *daemonClient) legacyDaemonError(daemonVersion string) error {
+	kill := `pkill -f "sherlog daemon"`
+	if runtime.GOOS == "windows" {
+		kill = `Get-Process sherlog | Stop-Process`
+	}
+	return fmt.Errorf(
+		"the running sherlog daemon is version %s but this sherlog is %s — that daemon predates automatic restart, so stop it once manually with: %s — sherlog then restarts it on the next tool call, and every future upgrade self-heals without this step",
+		daemonVersion, c.version, kill)
+}
+
+// waitPortFree polls until a fresh dial to the port is refused, i.e. the old
+// daemon has released its listener, so the respawn cannot race the bind
+// (daemon-self-heal-on-upgrade D4). Bounded: a daemon that never lets go is
+// surfaced as an actionable error instead of a bind failure.
+func (c *daemonClient) waitPortFree(ctx context.Context) error {
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if !c.portOccupiedByForeign(ctx) {
+			return nil // dial refused: the listener is gone
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("old sherlog daemon did not release port %s within timeout — stop it manually and retry", c.port)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// doSpawn launches the replacement daemon, honoring the test seam: the real
+// spawn execs os.Executable(), which under `go test` is the test binary itself.
+func (c *daemonClient) doSpawn() error {
+	if c.spawn != nil {
+		return c.spawn()
+	}
+	return c.spawnDaemon()
 }
 
 // foreignPortError is the actionable message for a non-sherlog listener (D4).
