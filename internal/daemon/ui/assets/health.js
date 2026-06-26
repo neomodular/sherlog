@@ -8,14 +8,6 @@
 import { api } from "./api.js";
 import { esc, fmtDate, html } from "./render.js";
 
-// MASCOT is the exact header sprite (index.html .sprite). The status header reuses it
-// verbatim so the healthy state shows the same glyph the user already knows as sherlog.
-const MASCOT = `     ▄▄▄▄
- ▄▄████████▄▄
-   ▐▛███▜▌
-  ▝▜█████▛▘
-    ▘▘ ▝▝`;
-
 const POLL_MS = 5000;
 
 // View-scoped state. timer drives polling; uptimeTimer ticks the uptime second-by-
@@ -99,7 +91,7 @@ function statusHeader(stats) {
     : failed.map((c) => esc(c.detail)).join(" · ");
   return `
     <div class="health-status ${healthy ? "ok" : "fail"}">
-      <pre class="sprite" aria-hidden="true">${esc(MASCOT)}</pre>
+      <img class="logo" src="/logo.png" alt="" aria-hidden="true">
       <div class="status-msg">${message}</div>
     </div>`;
 }

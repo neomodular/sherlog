@@ -1,13 +1,10 @@
-<!-- Hero: terminal mascot sprite — coral Clawd-cousin "Watson" in a navy
-inspector cap. The skill prints this colorized at session start; rendered plain
-here. See docs/brand.md. -->
-```
-     ▄▄▄▄
- ▄▄████████▄▄
-   ▐▛███▜▌
-  ▝▜█████▛▘
-    ▘▘ ▝▝
-```
+<!-- Hero: the sherlog banner — Watson the coral detective magnifying the red lines
+out of a wall of logs. The square mascot art is docs/mascot.png (the Case Board
+logo); the terminal banner the skill prints is a text wordmark, not a sprite. See
+docs/brand.md. -->
+<p align="center">
+  <img src="docs/banner.jpeg" alt="sherlog — a coral detective in a navy inspector cap magnifying the glowing red lines in a wall of logs">
+</p>
 
 # sherlog
 

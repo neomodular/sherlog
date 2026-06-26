@@ -384,10 +384,10 @@ cleanup gate. Verbosity changes how you *say* things, not what you *do*.
 
 **`verbosity`:**
 
-- **`detective`** (default) — the full presentation below: the mascot sprite, the
+- **`detective`** (default) — the full presentation below: the wordmark banner, the
   branded status line, and the detective vocabulary ("the game is afoot",
   "elementary.", "case closed").
-- **`minimal`** — drop all of it. **No sprite art, no detective phrases**, no
+- **`minimal`** — drop all of it. **No banner, no detective phrases**, no
   flourish. Print plain status lines instead:
   - In place of the banner: a one-line state plus the Case Board link once, e.g.
     `sherlog · <title> · #<id> · N suspects · M probes · port <port>` followed by
@@ -401,54 +401,44 @@ cleanup gate. Verbosity changes how you *say* things, not what you *do*.
 
 **`color`:**
 
-- **`auto`** (default) — colorize the sprite when the terminal supports ANSI
+- **`auto`** (default) — colorize the wordmark when the terminal supports ANSI
   truecolor; print plain otherwise (the existing behavior).
 - **`always`** — always emit the ANSI color sequences.
 - **`never`** — **strip all ANSI escape sequences**; print plain text only.
-  Applies in `detective` mode too (plain sprite, no color codes).
+  Applies in `detective` mode too (plain banner, no color codes).
 
 ## Branded presentation
 
-*(Detective verbosity. In `minimal` mode, skip the sprite and vocabulary entirely
+*(Detective verbosity. In `minimal` mode, skip the wordmark and vocabulary entirely
 and use the plain status lines above — but keep the same facts and obligations.)*
 
-Print this banner at session start and at major transitions. **The sprite art
-never changes between states — only the status line text does.**
+Print this banner at session start and at major transitions. The terminal does not
+draw the mascot (it is a soft raster shape — see the Case Board logo and README for
+the real art); it prints a small **text wordmark** instead. **The wordmark line is
+constant — only the status line text changes between states.**
 
 Honor the `color` preference (above): render colorized only when `color` is
 `auto` (and the terminal supports ANSI) or `always`; with `color: never` print the
-plain sprite with no escape codes. When colorizing, render the **cap navy** and the
-**body coral** (leave the eye/background glyphs untouched). The sprite, character
-for character:
+plain banner with no escape codes. When colorizing, render the **wordmark coral**
+(bold) and dim the tagline. The banner, three lines:
 
 ```
-     ▄▄▄▄
- ▄▄████████▄▄
-   ▐▛███▜▌
-  ▝▜█████▛▘
-    ▘▘ ▝▝
-```
-
-Colorization (truecolor; cap = navy `38;2;30;58;110`, body = coral
-`38;2;255;111;97`):
-
-```
-\e[38;2;30;58;110m     ▄▄▄▄\e[0m
-\e[38;2;30;58;110m ▄▄████████▄▄\e[0m
-\e[38;2;255;111;97m   ▐▛███▜▌\e[0m
-\e[38;2;255;111;97m  ▝▜█████▛▘\e[0m
-\e[38;2;255;111;97m    ▘▘ ▝▝\e[0m
-```
-
-**Plain fallback** (no-color terminals, logs, or when color is unwanted): print
-the exact same sprite with no escape codes. Never substitute different glyphs.
-
-**Status line** (immediately under the sprite), exactly this shape:
-
-```
-sherlog · <title> · #<id> · N suspects · M probes · watching :2218
+sherlog · Elementary, dear developer.
+case "<title>" · #<id> · N suspects · M probes · watching :2218
 Case Board: http://127.0.0.1:2218 — watch the investigation live
 ```
+
+Colorization (truecolor; wordmark = coral `38;2;255;111;97` bold, tagline dimmed):
+
+```
+\e[1;38;2;255;111;97msherlog\e[0m \e[2m· Elementary, dear developer.\e[0m
+```
+
+**Plain fallback** (no-color terminals, logs, or when color is unwanted): print the
+same three lines with no escape codes.
+
+Line 1 is the **wordmark + tagline** — constant; it identifies the product. The
+status line and Case Board link follow:
 
 `<title>` is the case title from `debug_start`; `<id>` is the `session_id`; `N` =
 active suspects on the board; `M` = registered probes not yet removed; the port is

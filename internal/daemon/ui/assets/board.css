@@ -46,15 +46,15 @@ code { font-family: var(--mono); font-size: 0.9em; }
 }
 .brand { display: flex; align-items: center; gap: 0.85rem; color: var(--paper); }
 .brand:hover { text-decoration: none; }
-.sprite {
-  margin: 0;
-  font-family: var(--mono);
-  font-size: 0.5rem;
-  line-height: 1.05;
-  color: var(--coral);
-  white-space: pre;
+/* The mascot logo: a raster badge. The PNG carries its own light background, so a
+   border-radius rounds it into a chip that keeps the navy cap legible against the
+   navy topbar instead of letting it blend in. */
+.logo {
+  display: block;
+  height: 44px;
+  width: auto;
+  border-radius: 10px;
 }
-.sprite::first-line { color: #fff; } /* cap glyphs read lighter against navy */
 .wordmark { display: flex; flex-direction: column; line-height: 1.1; }
 .wordmark .name { font-weight: 700; letter-spacing: 0.04em; font-size: 1.15rem; }
 .wordmark .tag { font-size: 0.7rem; color: var(--coral); text-transform: uppercase; letter-spacing: 0.18em; }
@@ -201,8 +201,7 @@ tr.divergent td { background: #fff4f2; }
   border-left: 4px solid var(--ok);
 }
 .health-status.fail { border-left-color: var(--kill); }
-.health-status .sprite { font-size: 0.45rem; color: var(--coral); }
-.health-status .sprite::first-line { color: #fff; }
+.health-status .logo { height: 52px; border-radius: 12px; }
 .health-status .status-msg { font-size: 1.15rem; font-weight: 700; letter-spacing: 0.02em; }
 .health-status.ok .status-msg { color: #fff; }
 .health-status.fail .status-msg { color: var(--coral); font-weight: 600; font-size: 0.95rem; line-height: 1.4; }
