@@ -5,7 +5,7 @@
 // badged too so a partial count is never mistaken for a complete one.
 
 import { api } from "./api.js";
-import { esc, badge, html, eventBody, displayName } from "./render.js";
+import { esc, badge, html, eventBody, displayName, caseTabs } from "./render.js";
 
 // runLabel describes a run for the picker: id + verdict, so a user can tell the
 // reproduced run from the fixed-check run without cross-referencing.
@@ -51,7 +51,7 @@ export async function renderDiff(view, sess, a, b) {
   if (runs.length < 2) {
     view.innerHTML = html([
       caseHeader(sess),
-      `<h2>Compare runs</h2>`,
+      caseTabs(sess.id, "diff"),
       `<p class="empty">Run comparison needs at least two runs; this case has ${runs.length}.</p>`,
     ]);
     return;
@@ -73,10 +73,10 @@ export async function renderDiff(view, sess, a, b) {
 
   view.innerHTML = html([
     caseHeader(sess),
-    `<h2>Compare runs</h2>`,
+    caseTabs(sess.id, "diff"),
     `<div class="picker">
        <label>Run A <select id="diffA">${options(selA)}</select></label>
-       <span>vs</span>
+       <span class="muted">vs</span>
        <label>Run B <select id="diffB">${options(selB)}</select></label>
      </div>`,
     `<div id="diffBody"><p class="loading">Comparing…</p></div>`,

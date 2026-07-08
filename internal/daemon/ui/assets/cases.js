@@ -3,7 +3,7 @@
 // design D7). Clicking a card routes to its detail view.
 
 import { api } from "./api.js";
-import { esc, badge, fmtDate, html } from "./render.js";
+import { esc, badge, fmtDay, brief, html } from "./render.js";
 
 function activeSuspects(s) {
   return (s.hypotheses || []).filter((h) => h.status === "active").length;
@@ -13,17 +13,36 @@ function liveProbes(s) {
   return (s.probes || []).filter((p) => !p.removed).length;
 }
 
+// project shows just the working directory's basename in the card meta (the full
+// path is a tooltip) — the list is a shelf of case spines, not a filesystem dump.
+function project(cwd) {
+  const base = String(cwd || "").split("/").filter(Boolean).pop();
+  return base || "?";
+}
+
+// metaLine keeps the card's second line to what helps you pick a case: id,
+// project, the counts that are non-zero noise-free (an open case shows its live
+// investigation counts; a closed one only its runs), and the opened date.
+function metaLine(s, closed) {
+  const parts = [`#${esc(s.id)}`, `<span title="${esc(s.cwd || "")}">${esc(project(s.cwd))}</span>`];
+  const runs = (s.runs || []).length;
+  if (!closed) {
+    parts.push(`${activeSuspects(s)} suspects`, `${liveProbes(s)} live probes`);
+  }
+  parts.push(`${runs} run${runs === 1 ? "" : "s"}`, `opened ${fmtDay(s.created_at)}`);
+  return parts.join(" · ");
+}
+
 function card(s) {
   const closed = !!s.closed_at;
   const res = s.resolution;
-  // A closed case shows its root cause / fix one-liner when solved; an unsolved
-  // close is labeled as such so the archive distinguishes the two (design D4).
+  // A closed case shows a BRIEF root-cause teaser when solved (clamped in CSS as a
+  // second line of defense); the full resolution lives in the detail view. An
+  // unsolved close is labeled as such so the archive distinguishes the two (D4).
   let resLine = "";
   if (closed) {
     if (res && res.root_cause) {
-      resLine = `<div class="resolution"><b>Root cause:</b> ${esc(res.root_cause)}${
-        res.fix_summary ? ` — ${esc(res.fix_summary)}` : ""
-      }</div>`;
+      resLine = `<div class="resolution"><b>Root cause:</b> ${esc(brief(res.root_cause))}</div>`;
     } else {
       resLine = `<div class="resolution muted">Closed without a recorded resolution.</div>`;
     }
@@ -34,15 +53,11 @@ function card(s) {
   // cases — so the title field is the single source here.
   return `
     <a class="case-card ${closed ? "closed" : ""}" href="#/case/${encodeURIComponent(s.id)}">
-      <div class="desc">${esc(s.title || "(untitled case)")} ${badge(
-    closed ? "closed" : "open",
-    closed ? "closed" : "open"
-  )}</div>
-      <div class="meta">
-        #${esc(s.id)} · ${esc(s.cwd || "?")} ·
-        ${activeSuspects(s)} active suspects · ${liveProbes(s)} live probes ·
-        ${(s.runs || []).length} runs · opened ${fmtDate(s.created_at)}
+      <div class="card-top">
+        <span class="title">${esc(s.title || "(untitled case)")}</span>
+        ${badge(closed ? "closed" : "open", closed ? "closed" : "open")}
       </div>
+      <div class="meta">${metaLine(s, closed)}</div>
       ${resLine}
     </a>`;
 }

@@ -17,6 +17,7 @@ import {
   cleanStatement,
   hypothesisColor,
   hypChip,
+  caseTabs,
 } from "./render.js";
 import { caseHeader } from "./diff.js";
 
@@ -89,11 +90,13 @@ function factRow(label, value) {
 }
 
 // verdictPanel renders the case's climax ABOVE the board when a hypothesis is
-// confirmed or a resolution is recorded (polish-case-board D3): the confirmed
-// statement as the coral headline, then Root cause / Fix / Confirmed by / Closed
-// fact rows. Confirmed-by lists the attributed probes' display names and the runs
-// they fired in as chips. An open case with no confirmation renders nothing — no
-// empty panel. idx supplies the confirmed hypothesis's chip (which carries coral).
+// confirmed or a resolution is recorded (polish-case-board D3). The layout reads
+// top-down like a closing report: a VERDICT eyebrow with the closed date, the
+// confirmed suspect chip, the confirmed statement as a quoted lede (ink text,
+// coral rule — never a wall of red), then Root cause / Fix / Confirmed by fact
+// rows. Confirmed-by lists the attributed probes' display names and the runs they
+// fired in as chips. An open case with no confirmation renders nothing — no empty
+// panel. idx supplies the confirmed hypothesis's chip (which carries coral).
 function verdictPanel(sess, hyps, probes, runs, idx) {
   const win = confirmedHyp(sess, hyps);
   const r = sess.resolution;
@@ -101,10 +104,6 @@ function verdictPanel(sess, hyps, probes, runs, idx) {
 
   const rootCause = (r && r.root_cause) || "";
   const fix = (r && r.fix_summary) || "";
-
-  // The statement is the headline; fall back to the resolution's root cause if the
-  // board carries no confirmed hypothesis (resolution-only legacy close).
-  const headline = win ? cleanStatement(win.statement) : rootCause;
 
   const probeChips = win
     ? confirmingProbes(probes, win.id)
@@ -123,7 +122,6 @@ function verdictPanel(sess, hyps, probes, runs, idx) {
     .join("");
 
   const facts = html([
-    win ? factRow("Confirmed suspect", chipFor(idx, win.id)) : "",
     rootCause ? factRow("Root cause", esc(rootCause)) : "",
     fix ? factRow("Fix", esc(fix)) : "",
     probeChips || runChips
@@ -132,14 +130,21 @@ function verdictPanel(sess, hyps, probes, runs, idx) {
           `<span class="ev-chips">${probeChips}${runChips}</span>`
         )
       : "",
-    r && r.closed_at ? factRow("Closed", esc(fmtDate(r.closed_at))) : "",
   ]);
 
   return `
     <section class="verdict">
-      <div class="verdict-label">Verdict</div>
-      <h2 class="verdict-headline">${esc(headline)}</h2>
-      <div class="facts">${facts}</div>
+      <div class="verdict-top">
+        <span class="verdict-label">Verdict</span>
+        ${
+          r && r.closed_at
+            ? `<span class="verdict-when">Closed ${esc(fmtDate(r.closed_at))}</span>`
+            : ""
+        }
+      </div>
+      ${win ? `<div class="verdict-suspect">${chipFor(idx, win.id)} ${badge("confirmed", "confirmed")}</div>` : ""}
+      ${win ? `<p class="verdict-statement">${esc(cleanStatement(win.statement))}</p>` : ""}
+      ${facts ? `<div class="facts">${facts}</div>` : ""}
     </section>`;
 }
 
@@ -332,10 +337,7 @@ export async function renderDetail(view, id) {
     `<div class="crumbs">#${esc(sess.id)} · ${esc(sess.cwd || "?")} · opened ${fmtDate(
       sess.created_at
     )} · ${open ? badge("open", "open") : badge("closed", "closed")}</div>`,
-    `<div class="tabs">
-       <a href="#/case/${esc(sess.id)}" class="active">Detail</a>
-       <a href="#/case/${esc(sess.id)}/diff">Compare runs</a>
-     </div>`,
+    caseTabs(sess.id, "detail"),
     descriptionPanel(sess),
 
     // Verdict panel leads when the case is solved; renders nothing on an open,

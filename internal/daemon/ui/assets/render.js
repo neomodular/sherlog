@@ -26,11 +26,49 @@ export function fmtTime(ts) {
 }
 
 // fmtDate renders an ISO timestamp as a local date+time for case/run metadata.
+// Medium date + short time ("Jun 18, 2026, 1:04 PM") — seconds are noise here;
+// the evidence tail keeps them via fmtTime.
 export function fmtDate(ts) {
   if (!ts) return "—";
   const d = new Date(ts);
   if (isNaN(d)) return "—";
-  return d.toLocaleString();
+  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+// fmtDay renders an ISO timestamp as a local date only ("Jun 18, 2026") for
+// contexts where the time of day adds nothing (case-card metadata).
+export function fmtDay(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  if (isNaN(d)) return "—";
+  return d.toLocaleDateString(undefined, { dateStyle: "medium" });
+}
+
+// brief condenses a long prose field to a card-sized teaser: whitespace is
+// collapsed, then the text is cut at the first sentence boundary past a minimum,
+// or at a word boundary near max. The full text always lives in the detail view;
+// this is a spine label, never the record (the store is untouched).
+export function brief(text, max = 220) {
+  if (!text) return "";
+  const t = String(text).trim().replace(/\s+/g, " ");
+  if (t.length <= max) return t;
+  const dot = t.indexOf(". ", 60);
+  if (dot !== -1 && dot < max) return t.slice(0, dot + 1);
+  const cut = t.lastIndexOf(" ", max);
+  return t.slice(0, cut > 60 ? cut : max) + "…";
+}
+
+// caseTabs renders the Detail/Compare-runs segmented control shared by both case
+// views, so every case page can reach the other (a diff view without a way back
+// to the detail was a dead end).
+export function caseTabs(id, active) {
+  const tab = (route, label, href) =>
+    `<a href="${href}" class="${active === route ? "active" : ""}">${label}</a>`;
+  return `<div class="tabs">${tab(
+    "detail",
+    "Case detail",
+    `#/case/${encodeURIComponent(id)}`
+  )}${tab("diff", "Compare runs", `#/case/${encodeURIComponent(id)}/diff`)}</div>`;
 }
 
 // badge builds a labeled pill; cls selects the palette (board.css). Used for
@@ -81,10 +119,11 @@ export function displayName(id) {
 }
 
 // selfPrefix matches a leading self-identifier on a stored statement/note —
-// "h1: ", "p2 - ", "h3 – " — that legacy sessions wrote before the skill's
-// no-prefix rule (polish-case-board D1/D5). The skill now stores bare claims, but
-// older data is untouched on disk, so the UI strips one such prefix at render time.
-const selfPrefix = /^[hp]\d+\s*[:\-–]\s*/;
+// "h1: ", "p2 - ", "h3 – ", "h3 — " — that legacy sessions wrote before the
+// skill's no-prefix rule (polish-case-board D1/D5). The skill now stores bare
+// claims, but older data is untouched on disk, so the UI strips one such prefix
+// at render time. The dash class covers hyphen, en dash, and em dash.
+const selfPrefix = /^[hp]\d+\s*[:\-–—]\s*/;
 
 // cleanStatement defensively removes a leading self-ID prefix from a stored
 // statement so a derived name is never rendered next to a duplicate raw ID
