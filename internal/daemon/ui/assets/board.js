@@ -12,6 +12,57 @@ import { esc } from "./render.js";
 
 const view = document.getElementById("view");
 
+// --- theme toggle: auto → dark → light, persisted client-side ---
+// The pre-paint script in index.html already stamped data-theme from
+// localStorage (or a ?theme= override); this block only wires the topbar
+// button. "auto" removes the stamp so color-scheme follows the OS — the right
+// default for someone who works days AND nights.
+const THEME_KEY = "sherlog-theme";
+const THEME_META = {
+  auto: { glyph: "◐", label: "Theme: auto (follows your system)" },
+  dark: { glyph: "☾", label: "Theme: dark" },
+  light: { glyph: "☀", label: "Theme: light" },
+};
+
+function currentTheme() {
+  const t = document.documentElement.dataset.theme;
+  return t === "light" || t === "dark" ? t : "auto";
+}
+
+// applyTheme stamps (or clears, for auto) the root data-theme and syncs the
+// button glyph. persist=false is the init path: a ?theme= deep-link override
+// must style this load without silently becoming the saved preference.
+function applyTheme(mode, persist) {
+  if (mode === "light" || mode === "dark") {
+    document.documentElement.dataset.theme = mode;
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+  const btn = document.getElementById("themeToggle");
+  if (btn) {
+    const meta = THEME_META[mode] || THEME_META.auto;
+    btn.textContent = meta.glyph;
+    btn.title = meta.label;
+    btn.setAttribute("aria-label", meta.label);
+  }
+  if (!persist) return;
+  try {
+    // "auto" clears the key: absence IS the auto state, so a fresh browser and
+    // a reset one behave identically.
+    if (mode === "light" || mode === "dark") localStorage.setItem(THEME_KEY, mode);
+    else localStorage.removeItem(THEME_KEY);
+  } catch {
+    // Storage unavailable (private mode): the theme still applies for this page.
+  }
+}
+
+const themeButton = document.getElementById("themeToggle");
+if (themeButton) {
+  const cycle = { auto: "dark", dark: "light", light: "auto" };
+  themeButton.addEventListener("click", () => applyTheme(cycle[currentTheme()], true));
+  applyTheme(currentTheme(), false); // paint the initial glyph/label only
+}
+
 // setNav highlights the active top-level destination.
 function setNav(route) {
   for (const a of document.querySelectorAll(".nav a")) {

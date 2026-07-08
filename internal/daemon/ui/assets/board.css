@@ -1,26 +1,48 @@
 /* Case Board theme — navy/coral detective palette (design D7). All values are
    local: no @import, no web fonts, no external URLs (case-board-ui spec: zero
-   external requests). Fonts fall back through the OS stack. */
+   external requests). Fonts fall back through the OS stack.
+
+   Light/dark theming: every surface token is a light-dark() pair resolved by the
+   root color-scheme. Auto mode (`:root` alone) follows the OS; the topbar toggle
+   stamps data-theme="light"/"dark" to force one (persisted client-side in
+   localStorage — the daemon holds no UI state). Brand anchors — the navy topbar,
+   the coral accent, solid navy fills — stay constant in both schemes. */
+
+:root { color-scheme: light dark; }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
 
 :root {
-  --navy: #1e3a6e;        /* cap navy — matches the mascot */
-  --navy-deep: #142844;
-  --navy-ink: #0d1b30;
+  /* brand constants (identical in both schemes) */
+  --navy: #1e3a6e;        /* cap navy — matches the mascot; solid fills */
+  --navy-deep: #142844;   /* topbar + health banner */
   --coral: #ff6f61;       /* body coral — matches the mascot */
-  --coral-dim: #c9544a;
-  --paper: #f4f1ea;       /* aged-paper case file */
-  --paper-line: #e5decf;
-  --card: #fffdf9;
-  --ink: #20242c;
-  --ink-soft: #454b57;
-  --muted: #6b7280;
-  --ok: #2f8f5b;
-  --kill: #b04a3f;
-  --warn: #c98a17;
+
+  /* scheme-aware tokens */
+  --coral-dim: light-dark(#c9544a, #ff8a7d);   /* coral as TEXT */
+  --paper: light-dark(#f4f1ea, #10141c);       /* page background */
+  --card: light-dark(#fffdf9, #1a2130);        /* raised surfaces */
+  --paper-line: light-dark(#e5decf, #2b3344);  /* borders */
+  --line-soft: light-dark(#f0ebdf, #232b3a);   /* row dividers */
+  --surface-2: light-dark(#faf7f0, #202839);   /* table headers */
+  --inset: light-dark(#eae4d6, #242d3e);       /* tab track */
+  --ink: light-dark(#20242c, #e7e9ee);
+  --ink-soft: light-dark(#454b57, #b9c0cc);
+  --muted: light-dark(#6b7280, #8a93a3);
+  --title: light-dark(#0d1b30, #f0f3f8);       /* headings on paper */
+  --link: light-dark(#1e3a6e, #a8c0e8);        /* navy as TEXT */
+  --card-edge: light-dark(#1e3a6e, #5f7db2);   /* case-card accent bar */
+  --ok: light-dark(#2f8f5b, #57c68c);
+  --kill: light-dark(#b04a3f, #e2836f);
+  --warn: light-dark(#c98a17, #dfae4d);
+  --sh-sm: light-dark(rgba(13, 27, 48, 0.05), rgba(0, 0, 0, 0.4));
+  --sh-md: light-dark(rgba(13, 27, 48, 0.04), rgba(0, 0, 0, 0.3));
+  --sh-lg: light-dark(rgba(13, 27, 48, 0.08), rgba(0, 0, 0, 0.5));
+
   --radius: 10px;
   --radius-lg: 14px;
-  --shadow: 0 1px 2px rgba(13, 27, 48, 0.05), 0 2px 6px rgba(13, 27, 48, 0.04);
-  --shadow-hover: 0 2px 4px rgba(13, 27, 48, 0.07), 0 8px 20px rgba(13, 27, 48, 0.08);
+  --shadow: 0 1px 2px var(--sh-sm), 0 2px 6px var(--sh-md);
+  --shadow-hover: 0 2px 4px var(--sh-md), 0 8px 20px var(--sh-lg);
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Consolas", "Liberation Mono", monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
@@ -36,7 +58,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-a { color: var(--navy); text-decoration: none; }
+a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 a:focus-visible { outline: 2px solid var(--coral); outline-offset: 2px; border-radius: 4px; }
 code { font-family: var(--mono); font-size: 0.9em; }
@@ -51,11 +73,11 @@ code { font-family: var(--mono); font-size: 0.9em; }
   gap: 1.5rem;
   padding: 0.55rem 1.5rem;
   background: var(--navy-deep);
-  color: var(--paper);
+  color: #f4f1ea;
   border-bottom: 3px solid var(--coral);
   box-shadow: 0 2px 10px rgba(13, 27, 48, 0.25);
 }
-.brand { display: flex; align-items: center; gap: 0.85rem; color: var(--paper); }
+.brand { display: flex; align-items: center; gap: 0.85rem; color: #f4f1ea; }
 .brand:hover { text-decoration: none; }
 /* The mascot logo: a raster badge. The PNG carries its own light background, so a
    circle crop turns it into a clean sticker that keeps the navy cap legible
@@ -85,6 +107,24 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .nav a:hover { background: rgba(255, 255, 255, 0.08); color: #fff; text-decoration: none; }
 .nav a.active { background: var(--coral); color: #fff; font-weight: 600; }
 
+/* Theme toggle: a round glyph button on the topbar. The glyph and label are set
+   by board.js (◐ auto / ☀ light / ☾ dark); the choice lives in localStorage. */
+.theme-toggle {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: #d7deea;
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.theme-toggle:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+.theme-toggle:focus-visible { outline: 2px solid var(--coral); outline-offset: 2px; }
+
 /* --- layout --- */
 .view { max-width: 1080px; margin: 1.75rem auto; padding: 0 1.5rem; }
 .footer {
@@ -98,17 +138,17 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .loading, .empty { color: var(--muted); font-style: italic; }
 .error { color: var(--kill); }
 
-h1 { color: var(--navy-ink); font-size: 1.45rem; letter-spacing: -0.01em; margin: 0 0 0.5rem; }
+h1 { color: var(--title); font-size: 1.45rem; letter-spacing: -0.01em; margin: 0 0 0.5rem; }
 /* Section headings read as file-folder labels: small caps, tracked out, quiet. */
 h2 {
-  color: var(--navy);
+  color: var(--link);
   font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.14em;
   font-weight: 700;
   margin: 2rem 0 0.6rem;
 }
-h3 { color: var(--navy); margin: 0 0 0.5rem; }
+h3 { color: var(--link); margin: 0 0 0.5rem; }
 .crumbs { font-size: 0.82rem; color: var(--muted); margin-bottom: 0.6rem; }
 
 /* --- case list --- */
@@ -124,7 +164,7 @@ h3 { color: var(--navy); margin: 0 0 0.5rem; }
   display: block;
   background: var(--card);
   border: 1px solid var(--paper-line);
-  border-left: 4px solid var(--navy);
+  border-left: 4px solid var(--card-edge);
   border-radius: var(--radius);
   padding: 0.85rem 1.1rem;
   margin-bottom: 0.65rem;
@@ -138,9 +178,9 @@ h3 { color: var(--navy); margin: 0 0 0.5rem; }
   box-shadow: var(--shadow-hover);
   transform: translateY(-1px);
 }
-.case-card.closed { border-left-color: #b8b2a4; }
+.case-card.closed { border-left-color: light-dark(#b8b2a4, #4a5468); }
 .case-card .card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; }
-.case-card .title { font-weight: 650; color: var(--navy-ink); font-size: 1.02rem; line-height: 1.35; }
+.case-card .title { font-weight: 650; color: var(--title); font-size: 1.02rem; line-height: 1.35; }
 .case-card .meta { font-size: 0.78rem; color: var(--muted); margin-top: 0.25rem; }
 /* Resolution teaser: one brief line, clamped — the card is a spine label, not the
    case file itself. The detail view carries the full story. */
@@ -168,12 +208,12 @@ h3 { color: var(--navy); margin: 0 0 0.5rem; }
   white-space: nowrap;
 }
 .badge.open { background: var(--coral); color: #fff; }
-.badge.closed { background: #e2dccd; color: #5d5647; }
-.badge.active { background: #dbe4f4; color: var(--navy); }
-.badge.killed { background: #f1d6d2; color: var(--kill); }
-.badge.confirmed { background: #d6efe0; color: var(--ok); }
-.badge.truncated { background: #f6e6c4; color: var(--warn); }
-.badge.adopted { background: #e6e0f4; color: #5b4a8f; }
+.badge.closed { background: light-dark(#e2dccd, #353d4d); color: light-dark(#5d5647, #c6ccd8); }
+.badge.active { background: light-dark(#dbe4f4, #253652); color: var(--link); }
+.badge.killed { background: light-dark(#f1d6d2, #3f2a2c); color: var(--kill); }
+.badge.confirmed { background: light-dark(#d6efe0, #1e3a2d); color: var(--ok); }
+.badge.truncated { background: light-dark(#f6e6c4, #3c3320); color: var(--warn); }
+.badge.adopted { background: light-dark(#e6e0f4, #322c4a); color: light-dark(#5b4a8f, #b5a6ea); }
 .badge.divergent { background: var(--coral); color: #fff; }
 .badge.verdict { background: var(--navy); color: #fff; }
 
@@ -190,7 +230,7 @@ h3 { color: var(--navy); margin: 0 0 0.5rem; }
 /* The case description below the title header: readable prose with bolded soft-
    structure headings (Symptom:/Expected:/Repro:/Context:) rendered by render.js. */
 .panel.description { color: var(--ink-soft); line-height: 1.6; font-size: 0.94rem; }
-.panel.description b { color: var(--navy); }
+.panel.description b { color: var(--link); }
 .panel .note { font-size: 0.85rem; color: var(--muted); margin-top: 0.3rem; }
 .panel.killed { opacity: 0.7; }
 .panel .pid { font-family: var(--mono); color: var(--coral-dim); }
@@ -207,10 +247,10 @@ table {
   overflow: hidden;
   box-shadow: var(--shadow);
 }
-th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--paper-line); vertical-align: top; }
+th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
 tr:last-child td { border-bottom: none; }
-th { color: var(--muted); background: #faf7f0; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.09em; font-weight: 700; }
-tr.divergent td { background: #fff4f2; }
+th { color: var(--muted); background: var(--surface-2); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.09em; font-weight: 700; }
+tr.divergent td { background: light-dark(#fff4f2, #2e2126); }
 .loc { font-family: var(--mono); font-size: 0.82rem; }
 
 /* --- evidence tail --- */
@@ -231,7 +271,7 @@ tr.divergent td { background: #fff4f2; }
   grid-template-columns: 5.5rem 6.5rem 1fr;
   gap: 0.6rem;
   padding: 0.3rem 0.85rem;
-  border-bottom: 1px solid #f0ebdf;
+  border-bottom: 1px solid var(--line-soft);
   font-family: var(--mono);
   font-size: 0.78rem;
 }
@@ -241,8 +281,8 @@ tr.divergent td { background: #fff4f2; }
 .tail .ts { color: var(--muted); }
 .tail .probe { color: var(--coral-dim); }
 .tail .body { white-space: pre-wrap; word-break: break-word; }
-.tail .kind { color: var(--navy); font-style: italic; }
-@keyframes flash { from { background: #fff3c4; } to { background: transparent; } }
+.tail .kind { color: var(--link); font-style: italic; }
+@keyframes flash { from { background: light-dark(#fff3c4, #4a3d1c); } to { background: transparent; } }
 .live-dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--muted); margin-left: 0.4rem; vertical-align: middle; }
 .live-dot.on { background: var(--ok); box-shadow: 0 0 0 0 rgba(47,143,91,0.6); animation: pulse 1.6s infinite; }
 @keyframes pulse { 70% { box-shadow: 0 0 0 6px rgba(47,143,91,0); } 100% { box-shadow: 0 0 0 0 rgba(47,143,91,0); } }
@@ -270,7 +310,7 @@ tr.divergent td { background: #fff4f2; }
   display: inline-flex;
   gap: 0.2rem;
   margin: 0.75rem 0 1.1rem;
-  background: #eae4d6;
+  background: var(--inset);
   border-radius: 999px;
   padding: 0.2rem;
 }
@@ -282,8 +322,8 @@ tr.divergent td { background: #fff4f2; }
   color: var(--muted);
   transition: background 0.15s ease, color 0.15s ease;
 }
-.tabs a:hover { text-decoration: none; color: var(--navy); }
-.tabs a.active { background: var(--card); color: var(--navy); box-shadow: var(--shadow); }
+.tabs a:hover { text-decoration: none; color: var(--link); }
+.tabs a.active { background: var(--card); color: var(--link); box-shadow: var(--shadow); }
 
 /* --- health view --- */
 .health-status {
@@ -291,7 +331,7 @@ tr.divergent td { background: #fff4f2; }
   align-items: center;
   gap: 1.1rem;
   background: var(--navy-deep);
-  color: var(--paper);
+  color: #f4f1ea;
   border-radius: var(--radius-lg);
   padding: 1rem 1.4rem;
   margin-bottom: 1rem;
@@ -305,7 +345,7 @@ tr.divergent td { background: #fff4f2; }
 .health-status.fail .status-msg { color: var(--coral); font-weight: 600; font-size: 0.95rem; line-height: 1.4; }
 
 .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.4rem 1.5rem; }
-.kv { display: flex; justify-content: space-between; gap: 1rem; padding: 0.2rem 0; border-bottom: 1px solid #f0ebdf; }
+.kv { display: flex; justify-content: space-between; gap: 1rem; padding: 0.2rem 0; border-bottom: 1px solid var(--line-soft); }
 .kv .k { color: var(--muted); }
 .kv .v { color: var(--ink); text-align: right; word-break: break-word; }
 .mono { font-family: var(--mono); font-size: 0.85em; }
@@ -319,9 +359,9 @@ tr.divergent td { background: #fff4f2; }
   padding: 0.05rem 0.4rem;
   border-radius: 999px;
 }
-.src-default { background: #e2dccd; color: #5d5647; }
-.src-file { background: #dbe4f4; color: var(--navy); }
-.src-env { background: #f6e6c4; color: var(--warn); }
+.src-default { background: light-dark(#e2dccd, #353d4d); color: light-dark(#5d5647, #c6ccd8); }
+.src-file { background: light-dark(#dbe4f4, #253652); color: var(--link); }
+.src-env { background: light-dark(#f6e6c4, #3c3320); color: var(--warn); }
 
 /* --- hypothesis identity: color chips + suspect cards (polish-case-board D2) --- */
 /* A hypothesis reference: colored dot + display name. The dot color comes from the
@@ -339,7 +379,7 @@ tr.divergent td { background: #fff4f2; }
 .panel.suspect { border-left: 4px solid var(--chip, var(--navy)); }
 .panel.suspect .statement { font-weight: 500; color: var(--ink-soft); }
 .panel.suspect .statement .hyp-chip { font-weight: 650; }
-.panel.suspect.confirmed { border-left-color: var(--coral); background: #fff8f6; }
+.panel.suspect.confirmed { border-left-color: var(--coral); background: light-dark(#fff8f6, #271f23); }
 .panel.suspect.killed { border-left-color: var(--muted); opacity: 0.75; }
 
 /* Ruled-out list: killed hypotheses receding below the active board (D3) — muted,
@@ -385,13 +425,13 @@ tr.divergent td { background: #fff4f2; }
   font-weight: 550;
   line-height: 1.5;
 }
-.verdict .facts { display: grid; gap: 0.65rem; border-top: 1px solid #f0ebdf; padding-top: 0.9rem; }
+.verdict .facts { display: grid; gap: 0.65rem; border-top: 1px solid var(--line-soft); padding-top: 0.9rem; }
 .verdict .fact { display: grid; grid-template-columns: 8.5rem 1fr; gap: 0.9rem; align-items: baseline; }
 .verdict .fact-label { color: var(--muted); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.09em; }
 .verdict .fact-value { color: var(--ink-soft); font-size: 0.93rem; line-height: 1.6; }
 .verdict .ev-chips { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; }
-.ev-chip { display: inline-block; font-family: var(--mono); font-size: 0.76rem; padding: 0.12rem 0.55rem; border-radius: 999px; background: #eef2f8; color: var(--navy); }
-.ev-chip.run { background: #f1ece0; color: var(--navy-ink); }
+.ev-chip { display: inline-block; font-family: var(--mono); font-size: 0.76rem; padding: 0.12rem 0.55rem; border-radius: 999px; background: light-dark(#eef2f8, #253248); color: var(--link); }
+.ev-chip.run { background: light-dark(#f1ece0, #303646); color: light-dark(#0d1b30, #d3d9e5); }
 
 @media (max-width: 40rem) {
   .verdict .fact { grid-template-columns: 1fr; gap: 0.15rem; }

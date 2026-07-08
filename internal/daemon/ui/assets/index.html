@@ -6,6 +6,21 @@
   <meta name="robots" content="noindex">
   <title>sherlog · Case Board</title>
   <link rel="icon" type="image/png" href="/logo.png">
+  <script>
+    // Pre-paint theme stamp: apply a forced light/dark choice before the
+    // stylesheet resolves so a dark-mode user never sees a light flash. A
+    // ?theme=light|dark query overrides for this load only (deep links,
+    // screenshots) without touching the saved choice; otherwise the persisted
+    // toggle state applies. No stamp = auto (follow the OS via color-scheme).
+    // All client-side: the daemon stores no UI state (read-only board, D2).
+    (function () {
+      try {
+        var t = new URLSearchParams(location.search).get("theme");
+        if (t !== "light" && t !== "dark") t = localStorage.getItem("sherlog-theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) { /* storage unavailable: stay on auto */ }
+    })();
+  </script>
   <link rel="stylesheet" href="/board.css">
 </head>
 <body>
@@ -23,6 +38,7 @@
       <a href="#/stale" data-route="stale">Stale probes</a>
       <a href="#/health" data-route="health">Health</a>
     </nav>
+    <button id="themeToggle" class="theme-toggle" type="button" aria-label="Theme"></button>
   </header>
 
   <main id="view" class="view" aria-live="polite">
