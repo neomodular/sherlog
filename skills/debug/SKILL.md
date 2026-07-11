@@ -22,12 +22,23 @@ own misbehavior (see "When sherlog itself misbehaves" below).
 
 ```
 gather context → debug_start → ≥3 suspects (set_hypotheses)
-→ ≥1 discriminating probe per suspect (register_probe) → print banner
-→ "the game is afoot" → user reproduces → await_run → close_run(verdict)
-→ analyze summary → kill / refine / split suspects (update_hypothesis + notes)
-→ iterate until one confirmed → fix → fixed-check run → "elementary."
-→ debug_end → remove every probe → grep = 0 matches → "case closed"
+→ ≥1 discriminating probe per suspect, each with its prediction pair (register_probe)
+→ print banner → "the game is afoot" → user reproduces → await_run → close_run(verdict)
+→ analyze summary → kill / refine / split suspects (update_hypothesis, cite probe+run)
+→ iterate until one confirmed
+→ map_blast_radius (before the fix) → annotate every hit honestly
+→ fix → await_run(prediction=…) → fixed-check run → "elementary."
+→ surface any sibling-bug hits → debug_end → remove every probe → grep = 0 matches → "case closed"
 ```
+
+The daemon now enforces the loop's shape as well as its evidence: it rejects a
+board under three suspects, a kill/confirm with no cited probe+run, a confirm
+without a reproduced run or predictions on the citing probe, a fixed-check close
+with no recorded prediction, a probe at a file/line that does not exist, a solved
+close whose confirmed hypothesis is not confirmed on the board, and a blast-radius
+search mapped before a confirm or whose pattern misses the confirmed culprit's own
+file. **A rejection is a discipline breach to repair, never an error to route
+around** — see "When the daemon rejects a transition" below.
 
 ---
 
@@ -164,10 +175,41 @@ hypothesis is true.
 - Use a distinct probe ID per location: `p1, p2, p3, …`. Substitute it for
   `<probe>` in the URL template.
 
-After editing each probe into the code, **register it**:
-`register_probe(session_id, id="p1", file="src/auth.js", line=42,
-hypothesis_id="h1", note="posts token + cache age to split race vs stale")`.
-Registration is the cleanup guarantee — an unregistered probe is an orphan.
+### Author the prediction pair (binding)
+
+A discriminating probe is only discriminating if you can say, **before** the run,
+what its payload looks like under each outcome. Register that as a pair:
+`expected_if_true` (what the probe shows if *its* hypothesis is the culprit) and
+`expected_if_false` (what it shows if that hypothesis is innocent). The daemon
+validates the pair — **both or neither**, and the two must **differ** (a pair that
+reads the same under either outcome proves nothing and is rejected).
+
+- **Every hypothesis SHALL have at least one predicted probe before the wait
+  begins.** A plain path-tracer probe ("did we reach this branch") MAY omit the
+  pair, but a suspect whose only probe is unpredicted cannot later be *confirmed* —
+  the confirm gate only accepts a citation to a probe that carries predictions.
+- Write concrete payload descriptions, not restatements of the hypothesis:
+  `expected_if_true="token=null, token_age_ms past TTL while the request fired"`,
+  `expected_if_false="token populated, token_age_ms well under TTL"`.
+
+After editing each probe into the code, **register it** with its file, line,
+hypothesis, and — for a discriminating probe — its prediction pair:
+
+```
+register_probe(session_id, id="p1", file="src/auth.js", line=42,
+  hypothesis_id="h1",
+  expected_if_true="token=null, token_age_ms past TTL while request fired",
+  expected_if_false="token populated, token_age_ms under TTL",
+  note="posts token + cache age to split race vs stale")
+```
+
+Registration is the cleanup guarantee — an unregistered probe is an orphan. The
+daemon also **verifies the location**: it resolves `file` against the session cwd
+(absolute paths as-is) and rejects a file that does not exist or a `line` past the
+file's end, with an error naming the resolved path. If you hit that, you named the
+wrong path (register the *source* file relative to the session cwd, not a
+bundled/generated one) or the wrong line — fix the argument and re-register; never
+invent a location the cleanup grep can never find.
 
 ## 4 · The game is afoot — reproduce and wait
 
@@ -233,36 +275,147 @@ never blindly trust it:
 
 Inspect the per-probe summary (and `query_logs(session_id, probe=..., run=...)`
 for detail — counts plus first/last samples, truncation always disclosed). Then
-act on the board, **always with an evidence note that cites the probe and run**:
+act on the board. **A kill or confirm SHALL cite the probe and run structurally**
+— pass `probe_id` and `run_id` (the probe and the *closed* run whose evidence you
+are reasoning from) alongside the free-text note. The note stays the
+human-readable explanation of the same evidence; the citation is what the daemon
+cross-checks against its own registry. A refine (`active`) needs no citation.
 
-- **Kill** a suspect the evidence refutes:
-  `update_hypothesis(session_id, "h2", "killed", "p4 in run r2 shows cache_age_ms
-  =12 — cache was fresh, not stale")`.
-- **Confirm** the one the evidence proves:
-  `update_hypothesis(session_id, "h1", "confirmed", "p1 in r2: token=null,
-  token_age_ms past TTL while request fired — the race")`.
+- **Kill** a suspect the evidence refutes — cite the probe+run:
+  `update_hypothesis(session_id, "h2", "killed", probe_id="p4", run_id="r2",
+  note="p4 in r2 shows cache_age_ms=12 — cache was fresh, not stale")`. A probe
+  that fired **zero times** (`total: 0`) is a valid citation — "fired zero times"
+  is load-bearing evidence.
+- **Confirm** the one the evidence proves — cite a *predicted* probe and a run,
+  and only after the bug has reproduced under instrumentation:
+  `update_hypothesis(session_id, "h1", "confirmed", probe_id="p1", run_id="r2",
+  note="p1 in r2: token=null, token_age_ms past TTL while request fired — the
+  race")`. The daemon rejects the confirm unless the session has ≥1 run closed
+  `reproduced` **and** the cited probe carries `expected_if_true`/`expected_if_false`.
 - **Refine / split**: if evidence reshapes a suspect or reveals two mechanisms
-  hiding under one, update its statement or call `set_hypotheses` again to add the
-  new suspect(s) and re-probe. A probe that fired **zero times** (`total: 0`) is
-  itself evidence — the code path wasn't taken (after the zero-event guard clears
-  connectivity).
+  hiding under one, update its statement (status `active`, no citation) or call
+  `set_hypotheses` again with the **full** board (replace semantics — resubmit the
+  survivors plus the new suspect(s), still ≥3) and re-probe.
 
 Iterate steps 3–5 — add or move probes, run again — until exactly one hypothesis
 is `confirmed` by probe evidence. Do not declare a winner on a hunch.
 
-## 6 · Fix, then verify with a fixed-check run
+### Determinism is reported from the computed rate, never asserted
+
+`await_run` and `debug_resume` return a **repro rate** — `reproduced` over
+(`reproduced` + `not-reproduced`) across the session's closed runs, with the raw
+counts (`2/5`). State determinism *from that number* ("reproduced 2/5 runs — this
+is intermittent"), never from memory ("it always fails"). For an intermittent
+bug, a **single** `not-reproduced` run in which a discriminating probe stayed
+quiet does **not** kill its suspect on its own — the bug simply didn't fire that
+time. Keep gathering runs; kill only when the evidence, across the runs you have,
+actually refutes the suspect.
+
+## 6 · Map the blast radius — after confirm, before the fix
+
+A confirmed root cause is rarely alone: the same anti-pattern usually lives at
+sibling call sites. Before you touch the fix, hunt for those siblings — and let
+the **daemon** run the hunt so the hit list is a recorded fact, not a claim. "I
+grepped for other occurrences" is exactly the kind of unrecorded, unrunnable
+assertion the rest of sherlog refuses to accept; `map_blast_radius` replaces it
+with a search the daemon executes and stores.
+
+1. **Author a pattern that targets the defect *mechanism*, not the symptom.** The
+   regex should match the anti-pattern you just confirmed — the float-rounding
+   call, the missing null-check shape, the unguarded cache read — **not** the error
+   text the user saw. Symptom prose does not recur at sibling sites; the mechanism
+   does.
+
+   ```
+   map_blast_radius(session_id, pattern="toFixed\\(2\\)\\s*\\*\\s*100",
+     note="float cents rounding before the discount multiply")
+   ```
+
+   The daemon compiles the pattern (Go's RE2 engine — a pathological pattern cannot
+   wedge it), walks the session cwd itself, and records every hit as `{file, line,
+   excerpt}`. **You never supply, add, or remove a hit** — the whole point is that
+   the list is the daemon's finding, not yours. It returns the hits, a `truncated`
+   flag, and the `unreviewed_count`.
+
+   One hygiene rule before you search: **never write scratch artifacts (saved tool
+   output, notes, temp scripts) inside the debugged repo tree.** The walk covers
+   the entire session cwd, so your own bookkeeping files become hits and pollute
+   the radius. Keep scratch files outside the project — a temp directory.
+
+2. **Map it while the anti-pattern still exists at the culprit — before the fix.**
+   The daemon **rejects a pattern that does not match the confirmed culprit's own
+   file** (the false-coverage gate): a pattern that misses the known bug proves
+   nothing about siblings. There is **no override** — if you fix the culprit first,
+   the pattern no longer matches it and the search is worthless. So the order is
+   fixed: confirm → map the radius → *then* fix.
+
+3. **Truncation is disclosed — narrow and re-run.** If `truncated` is true the
+   search hit the cap: the pattern is too broad and is matching noise. Tighten it
+   and call `map_blast_radius` again. A re-run **replaces** the whole radius and
+   clears every annotation (they graded a different search), so never treat stale
+   verdicts as still standing.
+
+4. **Grade every hit honestly** with `annotate_blast_radius`. Read each site and
+   assign a verdict:
+   - `sibling-bug` — the same defect lives here.
+   - `safe` — the pattern caught this line but it is not actually buggy. **A
+     legitimate verdict**: most broad-pattern hits are false positives, and saying
+     so is honest work, not a cop-out.
+   - `already-covered` — the site is already fixed, tested, or guarded.
+
+   ```
+   annotate_blast_radius(session_id, annotations=[
+     {file:"src/pricing.js", line:88, verdict:"sibling-bug",
+       note:"same toFixed→*100 rounding, no integer-cents path"},
+     {file:"src/tax.js", line:12, verdict:"safe",
+       note:"operates on integer cents already; the match is inside a comment"},
+   ])
+   ```
+
+   The daemon accepts a verdict **only for a `{file, line}` it recorded** — you
+   cannot grade a site the search did not find. Partial grading is fine; every hit
+   you leave alone stays `unreviewed`, and the result counts them.
+
+5. **Say the unreviewed part out loud.** A hit you genuinely cannot judge —
+   generated code, a vendored file, a construct you do not understand — **stays
+   `unreviewed`; do not guess a verdict to make the number look clean.** Tell the
+   user which sites you could not evaluate and why. An honest "5 hits: 1 sibling
+   bug, 3 safe, 1 unreviewed (generated, couldn't assess)" beats a fabricated
+   all-clear.
+
+6. **Never claim coverage without a recorded radius.** If the user asks whether the
+   bug exists elsewhere, answer **from the board's counts** — "the radius found 7
+   hits: 2 sibling bugs, 4 safe, 1 unreviewed" — or run the search first. Never
+   answer from recollection, and never restate coverage in prose to paper over a
+   rejected pattern: if the gate rejects the pattern for missing the culprit,
+   **refine the pattern and re-run**, do not narrate.
+
+The radius is **optional evidence, not a close requirement** — it never gates
+`debug_end` (see the cleanup gate below for how `sibling-bug` hits are surfaced at
+close). A case resumed *after* the fix was already applied simply proceeds without
+one: the sequencing gate makes a post-fix search worthless, and that is fine.
+
+## 7 · Fix, then verify with a fixed-check run
 
 1. Apply the fix for the confirmed hypothesis.
-2. Predict, out loud, how the evidence *should* change ("p1's token will now be
-   populated; the error-path probe p5 will fire zero times").
-3. Ask the user to retest; `await_run(session_id)`; then `close_run(session_id,
-   verdict="fixed-check")`.
+2. **Record the prediction on the run, not in the conversation.** Ask the user to
+   retest and open the fixed-check run *with* your prediction:
+   `await_run(session_id, prediction="p1's token now populated; error-path probe
+   p5 fires zero times")`. The board — never conversation memory — holds the claim
+   the fixed-check is judged against. The daemon stamps the prediction on the run
+   at that call, before it returns any summary, and it is immutable once set.
+3. Then `close_run(session_id, verdict="fixed-check")`. **`close_run(fixed-check)`
+   is rejected if the run carries no prediction** — if you awaited without one,
+   re-await with the `prediction` and have the user reproduce once more (do not
+   restate the prediction in prose to satisfy the gate — put it through the tool).
 4. Confirm the failure signature changed **as predicted** via the probe summary /
    `query_logs`, *and* the user reports the bug is gone. To make the before/after
    contrast explicit, `diff_runs(run_a=<reproduce run>, run_b=<fixed-check run>)`
    lists the probes that diverged between the failing and fixed runs (divergent
-   ones first) — a fast confirmation that the discriminating probe stopped firing
-   (or changed value) exactly where the fix should bite. Only with both signals: say
+   ones first) and echoes the fixed-check run's recorded `prediction` — judge the
+   divergence against that recorded claim, not against a remembered one. It is a
+   fast confirmation that the discriminating probe stopped firing (or changed
+   value) exactly where the fix should bite. Only with both signals: say
    **"elementary."** and go to cleanup. If the signature didn't change, the fix is
    wrong or the cause is misidentified — reopen the board.
    - If the fixed-check summary is **fully adopted** (the repro beat `await_run`),
@@ -271,21 +424,42 @@ is `confirmed` by probe evidence. Do not declare a winner on a hunch.
      the attribution was inferred); if anything is inconsistent, ask for one live
      reproduction before declaring the fix verified.
 
-## 7 · Cleanup gate — case closed only when clean
+## 8 · Cleanup gate — case closed only when clean
 
 The probe URL is its own marker, so leftover probes are always findable.
 
+**Before you close, surface the sibling bugs.** If the radius holds any
+`sibling-bug` hits, list every one to the user (file + line + your note) and ask
+how they want to proceed — fix them now as part of this case, or track them
+separately. **It is their call, and it does not block the close.** Never delay or
+gate `debug_end` on an unmapped, partial, or unreviewed radius: the radius informs
+the close, it never controls it.
+
 1. `debug_end(session_id)` → `unremoved_probes` (each with `file` + `line`),
    `greppable_fragment` (`…/log/<session>/`), and `cleanup_complete`.
-   **Record the resolution when solved:** if a root cause was confirmed, pass
-   `root_cause`, `fix_summary`, and `confirmed_hypothesis_id` to `debug_end` so the
-   case becomes recall material for future investigations —
+   **Record the resolution when solved:** if a root cause was confirmed, pass all
+   three of `root_cause`, `fix_summary`, and `confirmed_hypothesis_id` to
+   `debug_end` so the case becomes recall material for future investigations —
    `debug_end(session_id, root_cause="float rounding in discount calc",
    fix_summary="switched discount math to integer cents", confirmed_hypothesis_id="h1")`.
-   Keep both fields concise and factual; the confirmed hypothesis is the one you
-   marked `confirmed`. **Never fabricate a resolution:** if the case is closing
-   **unsolved**, say so plainly to the user and call `debug_end(session_id)` with no
-   resolution fields — an unsolved close is valid and must not invent a root cause.
+   Keep the fields concise and factual; the confirmed hypothesis is the one you
+   marked `confirmed` on the board. The daemon enforces the contract: supplying any
+   resolution field requires **all three**, and `confirmed_hypothesis_id` must name
+   a hypothesis whose status is `confirmed` on the board — otherwise the close is
+   **rejected and the session stays open** (it is *not* silently downgraded to
+   unsolved). If you get that rejection, confirm the hypothesis with evidence first,
+   or close unsolved deliberately. **Never fabricate a resolution:** if the case is
+   closing **unsolved**, say so plainly to the user and call `debug_end(session_id)`
+   with no resolution fields — an unsolved close is valid and must not invent a
+   root cause.
+   - **Prevention references, only when real.** If a regression test or guardrail
+     *actually exists* at close time, record it: `regression_test_ref` (a test name
+     that now covers the bug, e.g. `"TestRefreshRace"`) and/or `guardrail`
+     (`{type, ref}`, `type` ∈ `test | lint | alert | doc`). Sherlog records and
+     displays them; it never fetches or runs them. **Never invent one** — a solved
+     close with no prevention artifact simply omits these fields. They ride
+     alongside a full resolution; a lone reference is a partial resolution the
+     daemon rejects.
 2. **Remove every listed probe line** from the code. After deleting each,
    `remove_probe(session_id, id)`.
 3. **Grep gate (mandatory):** search the repo for the session fragment and require
@@ -302,6 +476,47 @@ The probe URL is its own marker, so leftover probes are always findable.
 
 > Safety net for later: `sherlog probes --stale` lists any registered-but-not-
 > removed probes across all sessions, even weeks afterward.
+
+---
+
+## When the daemon rejects a transition — repair, never route around
+
+The daemon enforces the loop's shape mechanically. Several transitions are now
+**gates**: it will reject a call with a one-line repair instruction rather than
+record a malformed or unjustified move. Every rejection is a **discipline breach
+to repair** — a signal you skipped a step, not an obstacle to get around. This is
+**not** a `report_observation` situation: a gate doing its job is expected
+behavior, not sherlog misbehaving. Do not file a field note for it.
+
+When you hit one, read the daemon's message, **perform the named repair, then
+retry** the corrected call:
+
+| Rejection | What it means | The repair |
+|---|---|---|
+| board needs at least three suspects | `set_hypotheses` got fewer than 3 | Name more distinct mechanisms; resubmit the full board (≥3). |
+| invalid probe prediction pair | one side of the pair is missing, or both read the same | Supply both `expected_if_true`/`expected_if_false`, and make them describe *different* payloads. |
+| evidence citation required | a kill/confirm arrived with no `probe_id`+`run_id` | Cite the probe and closed run whose evidence justifies the verdict. |
+| cited run has no recorded verdict | you cited an open run | `close_run` with the user's verdict first, then judge. |
+| no reproduced run in the session | confirming a bug never seen under instrumentation | Get one run closed `reproduced`, then confirm. |
+| cited probe carries no prediction pair | confirming on a path-tracer | Re-register a discriminating probe for that suspect with predictions, rerun, cite the new evidence. |
+| fixed-check run has no recorded prediction | you awaited without `prediction` | Re-await with `prediction=…`, have the user reproduce once more, then close fixed-check. |
+| solved close is missing required fields | a partial resolution (or a lone prevention ref) | Supply all of `root_cause`/`fix_summary`/`confirmed_hypothesis_id`, or close unsolved with none. |
+| confirmed hypothesis is not confirmed on the board | `confirmed_hypothesis_id` names a non-confirmed suspect | Confirm it with cited evidence first, or name the one you actually confirmed. |
+| probe file not found / line out of range | the file/line does not exist under the session cwd | Register the real *source* path (relative to the session cwd) and an in-range line. |
+| no confirmed root cause to check sibling coverage against | `map_blast_radius` ran before any hypothesis is `confirmed` | Confirm the culprit with cited evidence first, then map the radius. |
+| sibling pattern misses the confirmed culprit | the search found no hit in the culprit's own file | Broaden the pattern so it matches the culprit site too, then re-run — **never restate coverage in prose**. Do it before the fix, while the anti-pattern is still there. |
+| annotation cites a site not in the recorded hits | `annotate_blast_radius` graded a `{file, line}` the search never found | Grade only recorded hits; if the site should be covered, refine the pattern and re-run `map_blast_radius` first. |
+
+**Three things you must never do to satisfy a gate:**
+
+- **Never weaken the claim to fit a lenient path.** A confirm rejected for want of
+  a reproduced run is not downgraded to a refine to make it go through — you get
+  the reproduced run.
+- **Never close unsolved to bypass a failed solved close** the user believes is
+  solved. Fix the resolution (confirm the hypothesis) instead of recording the
+  case as unsolved to dodge the gate.
+- **Never retry the identical call.** A verbatim retry hits the same gate. Change
+  what the gate flagged, then retry.
 
 ---
 
@@ -362,14 +577,23 @@ When invoked as resume (or any time you've lost the thread):
 
 1. `debug_resume(session_id?)` — omit the ID for the latest open session, or pass
    a specific one. It returns the full `Session`: `title`, `description`, the
-   hypothesis board (`hypotheses` with `status` + `note`), the probe registry
-   (`probes` with `file`/`line`/`removed`), and `runs` (with `verdict`s).
+   pinned `commit` (if the cwd was a git tree), the hypothesis board (`hypotheses`
+   with `status`, `note`, and the `evidence_probe_id`/`evidence_run_id` citation on
+   any killed/confirmed suspect), the probe registry (`probes` with `file`/`line`/
+   `removed` and any `expected_if_true`/`expected_if_false`), `runs` (with
+   `verdict`s and any fix `prediction`), and the computed `repro_rate` with counts.
+   If a sibling search was already run, `blast_radius` carries its `pattern`,
+   `hits` with verdicts, and `truncated` flag — read the radius from there, never
+   from memory.
 2. **Restate from the board, not from memory**: the case `title`, the bug, the
    surviving (`active`) suspects, where the live probes are, and what the runs
    concluded.
 3. Continue at the right stage: still gathering evidence → another `await_run`;
-   one suspect confirmed → fix; fix applied → fixed-check; everything verified →
-   cleanup gate. Pick up exactly where the board left off.
+   one suspect confirmed but the fix not yet applied → map the blast radius, then
+   fix; fix applied → fixed-check; everything verified → cleanup gate. Pick up
+   exactly where the board left off. If the fix was already applied and no radius
+   was recorded, skip the radius (the sequencing gate makes a post-fix search
+   worthless) and proceed — it is optional.
 
 ---
 
@@ -460,17 +684,22 @@ else):
 
 - [ ] `debug_start` given a specific ≤60-char title and a soft-structured description (Symptom/Expected/Repro/Context — only real content, exact errors quoted, nothing fabricated).
 - [ ] ≥3 distinct suspects on the board before any probe.
-- [ ] ≥1 *discriminating* probe per suspect, each `register_probe`'d with file+line+hypothesis.
-- [ ] Probes: one line, fire-and-forget, no JSON content-type, no new imports/wrappers.
+- [ ] ≥1 *discriminating* probe per suspect, each `register_probe`'d with file+line+hypothesis; **every suspect has ≥1 probe carrying an `expected_if_true`/`expected_if_false` pair before the wait** (path tracers may omit it, but an all-unpredicted suspect can't be confirmed).
+- [ ] Probes: one line, fire-and-forget, no JSON content-type, no new imports/wrappers; the registered file+line actually exists under the session cwd.
 - [ ] Block on `await_run`; ask for the verdict; never assume it.
 - [ ] Zero events + "I reproduced it" → connectivity/probe-wiring check, not suspect-killing.
+- [ ] Determinism stated from the computed `repro_rate` (`n/m`), never asserted from memory; one quiet `not-reproduced` run does not kill an intermittent suspect.
 - [ ] Fully adopted evidence (`adopted == total`) on a fixed-check → sanity-check, then accept with the "inferred" label or re-prompt for a live run.
 - [ ] Recalled cases used as leads only — cited when used, never killing/confirming a suspect; no fabricated citations.
-- [ ] Every kill/confirm carries an evidence note citing probe + run.
-- [ ] Fix verified by a `fixed-check` run whose signature changed as predicted.
-- [ ] Solved close records `root_cause` + `fix_summary` + `confirmed_hypothesis_id` at `debug_end`; unsolved close invents none.
+- [ ] Every kill/confirm cites `probe_id`+`run_id` (a closed run) plus the note; a confirm additionally needs ≥1 `reproduced` run and a cited probe carrying predictions.
+- [ ] After confirm and **before the fix**, blast radius mapped for the defect *mechanism* (not symptom text); the culprit file is in the hits (refine the pattern if the gate rejects — never narrate coverage); truncation → narrow and re-run.
+- [ ] Every radius hit graded honestly (`sibling-bug`/`safe`/`already-covered`); unjudgeable hits left `unreviewed` and said aloud; sibling coverage reported from the board's counts, never from memory or an unrecorded search.
+- [ ] `sibling-bug` hits surfaced to the user before `debug_end` (fix now or track — their call); the radius never blocks or gates the close.
+- [ ] Fix prediction recorded through `await_run(prediction=…)` **before** the fixed-check reproduction; fix verified by a `fixed-check` run whose signature changed as predicted.
+- [ ] Solved close records `root_cause` + `fix_summary` + `confirmed_hypothesis_id` (board-`confirmed`) at `debug_end`; prevention refs (`regression_test_ref`/`guardrail`) only when real; unsolved close invents none.
 - [ ] `debug_end` → remove all probes → grep fragment = 0 matches → "case closed".
+- [ ] A daemon gate rejection → perform the named repair and retry; never weaken the claim, close unsolved to bypass, or retry verbatim (and never `report_observation` it — a gate is not a misbehavior).
 - [ ] Case Board URL shown once in the opening banner.
 - [ ] State read from the daemon board, never from conversation memory.
-- [ ] sherlog itself misbehaved (not the user's bug) → `report_observation` silently, then continue.
+- [ ] sherlog itself misbehaved (not the user's bug, not a gate rejection) → `report_observation` silently, then continue.
 - [ ] `preferences` applied: `minimal` drops theming only — every obligation above still holds; `color: never` strips ANSI.

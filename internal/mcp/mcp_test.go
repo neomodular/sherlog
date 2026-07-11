@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +18,20 @@ import (
 	"github.com/neomodular/sherlog/internal/notes"
 	"github.com/neomodular/sherlog/internal/store"
 )
+
+// tempProbeFile writes a real source file with the given line count into a fresh
+// temp dir and returns its absolute path. The daemon's probe-location gate (D-G)
+// resolves absolute paths as-is, so registering a probe at this path passes the gate
+// without depending on the test process's working directory or any repo file.
+func tempProbeFile(t *testing.T, lines int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "probe_target.go")
+	body := strings.Repeat("// probe target line\n", lines)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write probe file: %v", err)
+	}
+	return path
+}
 
 // startTestDaemon starts a real daemon HTTP server on a free loopback port over a
 // temp-dir store and returns its base URL plus the bound port. The server is shut
@@ -131,12 +148,12 @@ func TestEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(tools.Tools) != 12 {
+	if len(tools.Tools) != 14 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("tool count = %d, want 12: %v", len(tools.Tools), names)
+		t.Fatalf("tool count = %d, want 14: %v", len(tools.Tools), names)
 	}
 
 	// debug_start: session + probe contract.
@@ -165,10 +182,13 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("set_hypotheses: got %+v", board.Board)
 	}
 
-	// register_probe for the suspect we will gather evidence on.
+	// register_probe for the suspect we will gather evidence on. The probe cites an
+	// absolute path to a real file so the daemon's location gate (D-G) passes without
+	// depending on the test process's cwd.
+	probeFile := tempProbeFile(t, 50)
 	var probe store.Probe
 	callTool(t, ctx, sess, "register_probe", map[string]any{
-		"session_id": sid, "id": "p1", "file": "auth.go", "line": 42, "hypothesis_id": "h1",
+		"session_id": sid, "id": "p1", "file": probeFile, "line": 42, "hypothesis_id": "h1",
 	}, &probe)
 	if probe.ID != "p1" || probe.Removed {
 		t.Fatalf("register_probe: got %+v", probe)
@@ -232,7 +252,7 @@ func TestEndToEnd(t *testing.T) {
 	if end.CleanupComplete {
 		t.Fatal("debug_end: cleanup should be incomplete with an unremoved probe")
 	}
-	if len(end.UnremovedProbes) != 1 || end.UnremovedProbes[0].File != "auth.go" {
+	if len(end.UnremovedProbes) != 1 || end.UnremovedProbes[0].File != probeFile {
 		t.Fatalf("debug_end unremoved = %+v", end.UnremovedProbes)
 	}
 	wantFrag := base + "/log/" + sid + "/"
@@ -383,9 +403,28 @@ func TestCaseLifecycleRecallAndDiff(t *testing.T) {
 		"session_id": first.SessionID,
 		"hypotheses": []string{"float rounding in discount calc", "stale price cache", "tax applied twice"},
 	}, &board1)
-	callTool(t, ctx, sess, "update_hypothesis", map[string]any{
-		"session_id": first.SessionID, "id": "h1", "status": "confirmed", "note": "probe showed .005 truncation",
+
+	// Confirm h1 the way the gates now require (D-B/D-C): a predicted probe, at least
+	// one reproduced run, and a citation naming both. The probe is removed before close
+	// so the solved case still reports a clean cleanup checklist.
+	c1File := tempProbeFile(t, 100)
+	callTool(t, ctx, sess, "register_probe", map[string]any{
+		"session_id": first.SessionID, "id": "p1", "file": c1File, "line": 10, "hypothesis_id": "h1",
+		"expected_if_true": "total truncates at .005", "expected_if_false": "total rounds correctly",
 	}, nil)
+	done0 := make(chan struct{})
+	go func() {
+		_, _ = call("await_run", map[string]any{"session_id": first.SessionID, "timeout_s": 1})
+		close(done0)
+	}()
+	<-done0
+	var c1run store.Run
+	callTool(t, ctx, sess, "close_run", map[string]any{"session_id": first.SessionID, "verdict": "reproduced"}, &c1run)
+	callTool(t, ctx, sess, "update_hypothesis", map[string]any{
+		"session_id": first.SessionID, "id": "h1", "status": "confirmed",
+		"note": "probe showed .005 truncation", "probe_id": "p1", "run_id": c1run.ID,
+	}, nil)
+	callTool(t, ctx, sess, "remove_probe", map[string]any{"session_id": first.SessionID, "id": "p1"}, nil)
 
 	// Close it solved: root cause + fix summary + confirmed hypothesis feed recall.
 	var end1 debugEndOut
@@ -396,7 +435,7 @@ func TestCaseLifecycleRecallAndDiff(t *testing.T) {
 		"confirmed_hypothesis_id": "h1",
 	}, &end1)
 	if !end1.CleanupComplete {
-		t.Fatalf("case 1 had no probes; cleanup should be complete: %+v", end1)
+		t.Fatalf("case 1 probe was removed; cleanup should be complete: %+v", end1)
 	}
 
 	// --- Case 2: a similar symptom must recall case 1. ---
@@ -419,10 +458,12 @@ func TestCaseLifecycleRecallAndDiff(t *testing.T) {
 		t.Errorf("recall match missing resolution fields: %+v", got)
 	}
 
-	// Probe p1 discriminates the suspect in case 2.
+	// Probe p1 discriminates the suspect in case 2. It cites an absolute path so the
+	// location gate (D-G) passes regardless of the test process's cwd.
+	c2File := tempProbeFile(t, 120)
 	var probe store.Probe
 	callTool(t, ctx, sess, "register_probe", map[string]any{
-		"session_id": second.SessionID, "id": "p1", "file": "discount.go", "line": 88, "hypothesis_id": "h1",
+		"session_id": second.SessionID, "id": "p1", "file": c2File, "line": 88, "hypothesis_id": "h1",
 	}, &probe)
 
 	// Run 1: reproduce — the buggy path fires p1.
@@ -439,10 +480,13 @@ func TestCaseLifecycleRecallAndDiff(t *testing.T) {
 	var reproRun store.Run
 	callTool(t, ctx, sess, "close_run", map[string]any{"session_id": second.SessionID, "verdict": "reproduced"}, &reproRun)
 
-	// Run 2: fixed-check — the fix removed the bad branch, so p1 never fires.
+	// Run 2: fixed-check — the fix removed the bad branch, so p1 never fires. The await
+	// carries a fix prediction, the prerequisite for a fixed-check close (D-D).
 	done2 := make(chan struct{})
 	go func() {
-		_, _ = call("await_run", map[string]any{"session_id": second.SessionID, "timeout_s": 1})
+		_, _ = call("await_run", map[string]any{
+			"session_id": second.SessionID, "timeout_s": 1, "prediction": "p1 fires zero times now",
+		})
 		close(done2)
 	}()
 	<-done2

@@ -15,6 +15,10 @@ const (
 	EventRun EventKind = "run"
 	// EventProbe is a probe registry change (register or remove).
 	EventProbe EventKind = "probe"
+	// EventRadius is a blast-radius change (search recorded or hits annotated,
+	// add-blast-radius): the payload is the updated BlastRadius so a Case Board can
+	// refresh the sibling section without a second store read.
+	EventRadius EventKind = "radius"
 )
 
 // Event is one store change broadcast to subscribers. Session scopes it so a

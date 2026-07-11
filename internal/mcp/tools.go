@@ -31,8 +31,10 @@ func registerTools(server *mcpsdk.Server, c *daemonClient) {
 		"Close the investigation and get the cleanup checklist: every probe not yet "+
 			"marked removed (with file and line) plus the greppable URL fragment to "+
 			"verify zero leftover probes remain in the code. When the case is solved, "+
-			"pass root_cause, fix_summary, and confirmed_hypothesis_id so it becomes "+
-			"recall material for future investigations; omit them to close unsolved.",
+			"pass root_cause, fix_summary, and confirmed_hypothesis_id (the id must name "+
+			"a board-confirmed hypothesis) so it becomes recall material; optionally add "+
+			"regression_test_ref and a guardrail (test/lint/alert/doc). Omit all "+
+			"resolution fields to close unsolved.",
 		debugEnd)
 
 	add(server, c, "diff_runs",
@@ -49,13 +51,19 @@ func registerTools(server *mcpsdk.Server, c *daemonClient) {
 		setHypotheses)
 
 	add(server, c, "update_hypothesis",
-		"Update a hypothesis's status (active, killed, confirmed) and attach an "+
-			"evidence note explaining why it was killed or confirmed.",
+		"Update a hypothesis's status (active, killed, confirmed) with an evidence "+
+			"note. A kill or confirm MUST cite probe_id and run_id — the probe and "+
+			"closed run whose evidence justifies the verdict; a refine (active) needs "+
+			"no citation. Confirm additionally requires a reproduced run and a cited "+
+			"probe that carries predictions.",
 		updateHypothesis)
 
 	add(server, c, "register_probe",
 		"Record a placed probe in the registry so cleanup is guaranteed findable: "+
-			"its ID, file, line, and the hypothesis it discriminates.",
+			"its ID, file, line, and the hypothesis it discriminates. The file and line "+
+			"must exist under the session cwd. Optionally supply expected_if_true and "+
+			"expected_if_false (both or neither, and they must differ) to make it a "+
+			"discriminating probe fit to confirm a root cause.",
 		registerProbe)
 
 	add(server, c, "remove_probe",
@@ -65,8 +73,10 @@ func registerTools(server *mcpsdk.Server, c *daemonClient) {
 	add(server, c, "await_run",
 		"Open (or re-attach to) a run and block until probe activity goes quiet or "+
 			"the timeout elapses (default 120s). Re-invoke after a timeout to keep "+
-			"waiting on the same run for long reproductions. Returns a per-probe "+
-			"summary, never raw logs.",
+			"waiting on the same run for long reproductions. Pass a prediction (how the "+
+			"evidence should change if a candidate fix is right) before a fixed-check "+
+			"run — it is required to later close that run fixed-check. Returns a "+
+			"per-probe summary plus the session's repro rate, never raw logs.",
 		awaitRun)
 
 	add(server, c, "close_run",
@@ -79,6 +89,27 @@ func registerTools(server *mcpsdk.Server, c *daemonClient) {
 			"and selected first/last events per bucket, with truncation disclosed. "+
 			"Never dumps raw logs.",
 		queryLogs)
+
+	add(server, c, "map_blast_radius",
+		"After a hypothesis is CONFIRMED and BEFORE you apply the fix, hunt for sibling "+
+			"occurrences of the same defect. Supply a regex pattern targeting the defect "+
+			"MECHANISM (not the symptom prose); the daemon runs the search under the "+
+			"session cwd and records every hit itself — you never supply the hit list. "+
+			"The pattern MUST match the confirmed culprit's file or the search is rejected "+
+			"(a pattern that misses the known bug proves nothing about siblings), so map it "+
+			"while the anti-pattern still exists at the culprit site. Returns each hit "+
+			"(file, line, excerpt), the truncation flag, and the unreviewed count. A re-run "+
+			"replaces the previous radius and clears its annotations.",
+		mapBlastRadius)
+
+	add(server, c, "annotate_blast_radius",
+		"Grade the sibling hits map_blast_radius recorded: for each, a verdict of "+
+			"sibling-bug, safe, or already-covered, with an optional note. You may only "+
+			"grade sites the search found — the daemon rejects any {file, line} not in the "+
+			"recorded hits. Partial grading is fine; ungraded hits stay unreviewed and the "+
+			"result reports the unreviewed count. Grade every hit honestly — safe is a "+
+			"legitimate verdict; a site you cannot judge stays unreviewed.",
+		annotateBlastRadius)
 
 	addReportObservation(server, c)
 }
@@ -123,7 +154,11 @@ type debugStartOut struct {
 	// Title echoes the case identity the session was created with (mcp-server spec:
 	// the response echoes it). Always non-empty: the daemon derives a fallback when
 	// the caller omitted a title.
-	Title         string         `json:"title"`
+	Title string `json:"title"`
+	// Commit is the repository commit SHA the daemon pinned on the session at creation
+	// when the cwd is a git work tree (harden-detective-gates D-H), omitted otherwise.
+	// Recording only — surfaced so the case is anchored to a known tree state.
+	Commit        string         `json:"commit,omitempty"`
 	ProbeContract probeContract  `json:"probe_contract"`
 	Preferences   preferences    `json:"preferences"`             // skill presentation (design D4)
 	WarnSameCWD   *store.Session `json:"warn_same_cwd,omitempty"` // a concurrent open session here
@@ -143,7 +178,10 @@ func debugStart(ctx context.Context, c *daemonClient, in debugStartIn) (debugSta
 		SessionID: res.Session.ID,
 		// The daemon-side session carries the title (the supplied one, or the derived
 		// fallback when omitted), so echo it from the response, never from the input.
-		Title:         res.Session.Title,
+		Title: res.Session.Title,
+		// Commit is whatever the daemon pinned at creation (D-H): the HEAD SHA in a git
+		// work tree, empty otherwise. Echoed from the session, never resolved here.
+		Commit:        res.Session.Commit,
 		ProbeContract: buildProbeContract(c.probeURLTemplate(res.Session.ID)),
 		Preferences:   res.Preferences,
 		WarnSameCWD:   res.ExistingSameCWD,
@@ -155,9 +193,13 @@ type debugResumeIn struct {
 	SessionID string `json:"session_id,omitempty" jsonschema:"resume this session; omit for the latest open one"`
 }
 
-func debugResume(ctx context.Context, c *daemonClient, in debugResumeIn) (*store.Session, error) {
+// debugResume returns the reconstructed session state plus the computed repro rate
+// with raw counts and the pinned commit (harden-detective-gates D-H, D-I), so a
+// resumed investigation carries its determinism signal and tree anchor alongside the
+// board, probe registry, and runs.
+func debugResume(ctx context.Context, c *daemonClient, in debugResumeIn) (*sessionState, error) {
 	var (
-		sess *store.Session
+		sess *sessionState
 		err  error
 	)
 	if in.SessionID != "" {
@@ -179,6 +221,21 @@ type debugEndIn struct {
 	RootCause             string `json:"root_cause,omitempty" jsonschema:"the confirmed root cause, when solved"`
 	FixSummary            string `json:"fix_summary,omitempty" jsonschema:"a concise summary of the fix, when solved"`
 	ConfirmedHypothesisID string `json:"confirmed_hypothesis_id,omitempty" jsonschema:"the hypothesis confirmed as culprit, e.g. h2"`
+	// Optional prevention references recorded with a solved close (harden-detective-
+	// gates D-J): a regression test that now covers the bug, and a guardrail control.
+	// Recorded and displayed, never fetched or executed (local-only invariant). Supply
+	// only alongside a full resolution — a lone reference is a partial resolution the
+	// daemon rejects.
+	RegressionTestRef string       `json:"regression_test_ref,omitempty" jsonschema:"name/ref of a regression test that now covers the bug"`
+	Guardrail         *guardrailIn `json:"guardrail,omitempty" jsonschema:"a prevention control: a test, lint, alert, or doc"`
+}
+
+// guardrailIn is the optional prevention control recorded on a solved close (D-J):
+// a typed reference the daemon validates (type ∈ {test, lint, alert, doc}) and
+// records, never executes. Ref is free text — a rule name, alert id, or doc path.
+type guardrailIn struct {
+	Type string `json:"type" jsonschema:"guardrail kind: test, lint, alert, or doc"`
+	Ref  string `json:"ref,omitempty" jsonschema:"free-text reference: a rule name, alert id, or doc path"`
 }
 
 type debugEndOut struct {
@@ -201,13 +258,21 @@ func debugEnd(ctx context.Context, c *daemonClient, in debugEndIn) (debugEndOut,
 	}
 	// Pass the resolution through only when at least one field is set; an all-empty
 	// resolution and a nil one both close the case unsolved (D4), so omitting the
-	// new fields preserves the prior debug_end behavior exactly.
+	// new fields preserves the prior debug_end behavior exactly. A prevention
+	// reference alone counts as a resolution field (D-J): it is forwarded so the
+	// daemon's solved-close gate (D-F) rejects the partial resolution rather than
+	// letting it slip through as unsolved.
 	var resolution *store.Resolution
-	if in.RootCause != "" || in.FixSummary != "" || in.ConfirmedHypothesisID != "" {
+	if in.RootCause != "" || in.FixSummary != "" || in.ConfirmedHypothesisID != "" ||
+		in.RegressionTestRef != "" || in.Guardrail != nil {
 		resolution = &store.Resolution{
 			RootCause:             in.RootCause,
 			FixSummary:            in.FixSummary,
 			ConfirmedHypothesisID: in.ConfirmedHypothesisID,
+			RegressionTestRef:     in.RegressionTestRef,
+		}
+		if in.Guardrail != nil {
+			resolution.Guardrail = &store.Guardrail{Type: in.Guardrail.Type, Ref: in.Guardrail.Ref}
 		}
 	}
 	res, err := c.closeSession(ctx, sessionID, resolution)
@@ -247,17 +312,42 @@ type updateHypothesisIn struct {
 	ID        string `json:"id" jsonschema:"the hypothesis ID, e.g. h2"`
 	Status    string `json:"status" jsonschema:"active, killed, or confirmed"`
 	Note      string `json:"note,omitempty" jsonschema:"evidence note explaining the status"`
+	// ProbeID and RunID cite the probe and closed run whose evidence justifies a kill
+	// or confirm (harden-detective-gates D-B). Required client-side for killed/confirmed
+	// (rejected before reaching the daemon); the daemon then cross-checks the citation
+	// against its own registry. A refine (status active) needs neither.
+	ProbeID string `json:"probe_id,omitempty" jsonschema:"probe whose evidence justifies a kill/confirm, e.g. p3"`
+	RunID   string `json:"run_id,omitempty" jsonschema:"closed run whose evidence justifies a kill/confirm, e.g. r2"`
 }
 
 func updateHypothesis(ctx context.Context, c *daemonClient, in updateHypothesisIn) (store.Hypothesis, error) {
 	if !validStatus(in.Status) {
 		return store.Hypothesis{}, fmt.Errorf("update_hypothesis: invalid status %q (want active, killed, or confirmed)", in.Status)
 	}
-	h, err := c.updateHypothesis(ctx, in.SessionID, in.ID, in.Status, in.Note)
+	// A kill or confirm must cite the probe_id and run_id whose evidence justifies the
+	// verdict (D-B). Enforced client-side — mirroring the status-enum gate — so an
+	// omitted citation fails with a clear message before reaching the daemon; the
+	// daemon then cross-checks the citation it does receive.
+	if requiresCitation(in.Status) && (in.ProbeID == "" || in.RunID == "") {
+		return store.Hypothesis{}, fmt.Errorf("update_hypothesis: a %s verdict must cite probe_id and run_id — the probe and closed run whose evidence justifies it", in.Status)
+	}
+	h, err := c.updateHypothesis(ctx, in.SessionID, in.ID, in.Status, in.Note, in.ProbeID, in.RunID)
 	if err != nil {
 		return store.Hypothesis{}, fmt.Errorf("update_hypothesis: %w", err)
 	}
 	return h, nil
+}
+
+// requiresCitation reports whether a status transition must carry an evidence
+// citation (D-B): killing or confirming a suspect does, refining it (active) does
+// not. It gates the citation client-side the way validStatus gates the enum.
+func requiresCitation(status string) bool {
+	switch store.HypothesisStatus(status) {
+	case store.HypothesisKilled, store.HypothesisConfirmed:
+		return true
+	default:
+		return false
+	}
 }
 
 // validStatus gates the hypothesis status enum client-side so a typo fails with a
@@ -278,13 +368,23 @@ type registerProbeIn struct {
 	File         string `json:"file" jsonschema:"source file the probe line sits in"`
 	Line         int    `json:"line" jsonschema:"line number of the probe"`
 	HypothesisID string `json:"hypothesis_id" jsonschema:"the hypothesis this probe discriminates"`
-	Note         string `json:"note,omitempty"`
+	// ExpectedIfTrue and ExpectedIfFalse are the optional discriminating prediction
+	// pair (harden-detective-gates D-A): how this probe's payload differs if its
+	// hypothesis is true vs false. Supply both or neither, and they must differ; the
+	// daemon validates the pair and echoes it back. A path tracer legitimately carries
+	// neither, but the confirm gate only accepts a confirming probe that carries them.
+	ExpectedIfTrue  string `json:"expected_if_true,omitempty" jsonschema:"what the probe shows if the hypothesis is true"`
+	ExpectedIfFalse string `json:"expected_if_false,omitempty" jsonschema:"what the probe shows if the hypothesis is false"`
+	Note            string `json:"note,omitempty"`
 }
 
 func registerProbe(ctx context.Context, c *daemonClient, in registerProbeIn) (store.Probe, error) {
 	p := store.Probe{
 		ID: in.ID, File: in.File, Line: in.Line,
-		HypothesisID: in.HypothesisID, Note: in.Note,
+		HypothesisID:    in.HypothesisID,
+		ExpectedIfTrue:  in.ExpectedIfTrue,
+		ExpectedIfFalse: in.ExpectedIfFalse,
+		Note:            in.Note,
 	}
 	saved, err := c.registerProbe(ctx, in.SessionID, p)
 	if err != nil {
@@ -316,6 +416,12 @@ func removeProbe(ctx context.Context, c *daemonClient, in removeProbeIn) (remove
 type awaitRunIn struct {
 	SessionID string `json:"session_id"`
 	TimeoutS  int    `json:"timeout_s,omitempty" jsonschema:"max seconds to wait; defaults to 120"`
+	// Prediction is the optional fix prediction (harden-detective-gates D-D): how the
+	// evidence should change if the candidate fix is right. The daemon stamps it on the
+	// run at call receipt — before any summary is returned — and it is immutable once
+	// set. It is the prerequisite for a later fixed-check close, so the contrast is
+	// judged against a recorded claim rather than conversation memory.
+	Prediction string `json:"prediction,omitempty" jsonschema:"how the evidence should change if the fix is right (required before a fixed-check close)"`
 }
 
 func awaitRun(ctx context.Context, c *daemonClient, in awaitRunIn) (awaitRunResult, error) {
@@ -323,7 +429,7 @@ func awaitRun(ctx context.Context, c *daemonClient, in awaitRunIn) (awaitRunResu
 	if timeout <= 0 {
 		timeout = 120 // D8 default, mirrored client-side for explicitness
 	}
-	res, err := c.awaitRun(ctx, in.SessionID, timeout)
+	res, err := c.awaitRun(ctx, in.SessionID, timeout, in.Prediction)
 	if err != nil {
 		return awaitRunResult{}, fmt.Errorf("await_run: %w", err)
 	}
@@ -379,8 +485,8 @@ func queryLogs(ctx context.Context, c *daemonClient, in queryLogsIn) (queryLogsO
 }
 
 type diffRunsIn struct {
-	RunA string `json:"run_a" jsonschema:"the first run ID to compare, e.g. 1"`
-	RunB string `json:"run_b" jsonschema:"the second run ID to compare, e.g. 3"`
+	RunA string `json:"run_a" jsonschema:"the first run ID to compare, e.g. r1"`
+	RunB string `json:"run_b" jsonschema:"the second run ID to compare, e.g. r3"`
 	// SessionID targets a specific investigation; omit to diff the latest open one,
 	// matching the latest-or-named pattern of debug_resume and close_run.
 	SessionID string `json:"session_id,omitempty" jsonschema:"the investigation; omit for the latest open one"`
@@ -390,20 +496,92 @@ type diffRunsIn struct {
 // The tool's contract is per the active session (run_a, run_b); session_id is an
 // optional override resolving to the latest open session otherwise, so a typical
 // fix-confirmation call needs only the two run IDs.
-func diffRuns(ctx context.Context, c *daemonClient, in diffRunsIn) (store.RunDiff, error) {
+func diffRuns(ctx context.Context, c *daemonClient, in diffRunsIn) (diffRunsResult, error) {
 	sessionID := in.SessionID
 	if sessionID == "" {
 		sess, err := c.resumeLatest(ctx)
 		if err != nil {
-			return store.RunDiff{}, fmt.Errorf("diff_runs: %w", err)
+			return diffRunsResult{}, fmt.Errorf("diff_runs: %w", err)
 		}
 		sessionID = sess.ID
 	}
 	diff, err := c.diffRuns(ctx, sessionID, in.RunA, in.RunB)
 	if err != nil {
-		return store.RunDiff{}, fmt.Errorf("diff_runs: %w", err)
+		return diffRunsResult{}, fmt.Errorf("diff_runs: %w", err)
 	}
 	return diff, nil
+}
+
+// --- blast radius: sibling-occurrence search + annotation (add-blast-radius) ---
+
+type mapBlastRadiusIn struct {
+	SessionID string `json:"session_id"`
+	// Pattern is the agent-authored regex the daemon executes (D-A): it targets the
+	// defect mechanism and must match the confirmed culprit's file, or the daemon's
+	// false-coverage gate rejects the search.
+	Pattern string `json:"pattern" jsonschema:"regex targeting the defect mechanism; must match the confirmed culprit's file"`
+	Note    string `json:"note,omitempty" jsonschema:"optional context recorded with the search"`
+}
+
+// mapBlastRadius is a pass-through to the daemon (D-A): the daemon compiles the
+// pattern, walks the session cwd, and enforces the false-coverage gate. Every
+// rejection — an empty or uncompilable pattern, no confirmed hypothesis, or a pattern
+// that misses the culprit file — comes back as a daemon error the wrap surfaces
+// verbatim, so the model can repair the pattern rather than fabricate coverage.
+func mapBlastRadius(ctx context.Context, c *daemonClient, in mapBlastRadiusIn) (blastRadiusResult, error) {
+	res, err := c.mapBlastRadius(ctx, in.SessionID, in.Pattern, in.Note)
+	if err != nil {
+		return blastRadiusResult{}, fmt.Errorf("map_blast_radius: %w", err)
+	}
+	return res, nil
+}
+
+type annotateBlastRadiusIn struct {
+	SessionID   string                 `json:"session_id"`
+	Annotations []blastAnnotationInput `json:"annotations" jsonschema:"per-hit verdicts to merge into the recorded radius"`
+}
+
+// blastAnnotationInput is one graded hit: the recorded {file, line} plus the agent's
+// verdict and an optional note. The verdict is validated against the closed enum
+// client-side before any daemon round-trip (D-D).
+type blastAnnotationInput struct {
+	File    string `json:"file" jsonschema:"the recorded hit's file, exactly as map_blast_radius returned it"`
+	Line    int    `json:"line" jsonschema:"the recorded hit's line"`
+	Verdict string `json:"verdict" jsonschema:"sibling-bug, safe, or already-covered"`
+	Note    string `json:"note,omitempty" jsonschema:"optional rationale for the verdict"`
+}
+
+// annotateBlastRadius validates every verdict against the closed enum client-side
+// (D-D) — mirroring the status/verdict gates — so a bad verdict fails with the allowed
+// set named before reaching the daemon; the daemon still set-checks each {file, line}
+// against the recorded hits it alone knows. A daemon rejection (unknown site, no
+// radius) surfaces verbatim.
+func annotateBlastRadius(ctx context.Context, c *daemonClient, in annotateBlastRadiusIn) (blastRadiusResult, error) {
+	anns := make([]blastAnnotationBody, len(in.Annotations))
+	for i, a := range in.Annotations {
+		if !validBlastVerdict(a.Verdict) {
+			return blastRadiusResult{}, fmt.Errorf("annotate_blast_radius: invalid verdict %q (want sibling-bug, safe, or already-covered)", a.Verdict)
+		}
+		anns[i] = blastAnnotationBody{File: a.File, Line: a.Line, Verdict: a.Verdict, Note: a.Note}
+	}
+	res, err := c.annotateBlastRadius(ctx, in.SessionID, anns)
+	if err != nil {
+		return blastRadiusResult{}, fmt.Errorf("annotate_blast_radius: %w", err)
+	}
+	return res, nil
+}
+
+// validBlastVerdict gates the blast-radius verdict enum client-side so a typo fails
+// with a clear message before hitting the daemon (D-D), mirroring validStatus and
+// validVerdict. The store re-validates authoritatively; this is the fast, actionable
+// front door.
+func validBlastVerdict(v string) bool {
+	switch store.BlastVerdict(v) {
+	case store.BlastSiblingBug, store.BlastSafe, store.BlastAlreadyCovered:
+		return true
+	default:
+		return false
+	}
 }
 
 // --- report_observation: the field-notes channel (field-notes D2/D3) ---

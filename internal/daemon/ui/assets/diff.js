@@ -7,11 +7,29 @@
 import { api } from "./api.js";
 import { esc, badge, html, eventBody, displayName, caseTabs } from "./render.js";
 
-// runLabel describes a run for the picker: id + verdict, so a user can tell the
-// reproduced run from the fixed-check run without cross-referencing.
+// runLabel describes a run for the picker: display name + verdict, so a user can
+// tell the reproduced run from the fixed-check run without cross-referencing.
 function runLabel(run) {
   const verdict = run.verdict ? ` (${run.verdict})` : run.closed_at ? "" : " (open)";
-  return `${run.id}${verdict}`;
+  return `${displayName(run.id)}${verdict}`;
+}
+
+// predictionBlock renders the recorded fix predictions for the two compared runs
+// ABOVE the probe divergence list (harden-detective-gates D-D / case-board-ui): a
+// fixed-check run carries a prediction stamped before its evidence returned, so the
+// divergence below is read against the recorded claim rather than conversation
+// memory. Reproduce runs typically carry none; when neither side has one, nothing
+// renders. Labeled with each run's display name.
+function predictionBlock(diff, aId, bId) {
+  const line = (id, text) =>
+    `<div class="pred-line"><span class="pred-run">${esc(displayName(id))} predicted</span> <span class="pred-text">${esc(
+      text
+    )}</span></div>`;
+  const rows = html([
+    diff.prediction_a ? line(aId, diff.prediction_a) : "",
+    diff.prediction_b ? line(bId, diff.prediction_b) : "",
+  ]);
+  return rows ? `<div class="diff-prediction">${rows}</div>` : "";
 }
 
 // sideCell renders one run's column for a probe: count with adoption/truncation
@@ -106,21 +124,60 @@ export async function renderDiff(view, sess, a, b) {
     body.innerHTML = `<p class="empty">No probes fired in either run.</p>`;
     return;
   }
-  body.innerHTML = `
-    <table>
-      <thead><tr><th>Probe</th><th>Run A · ${esc(selA)}</th><th>Run B · ${esc(selB)}</th></tr></thead>
+  body.innerHTML = html([
+    // The recorded fix prediction(s) sit above the divergence list so the observed
+    // contrast is judged against the claim (harden-detective-gates D-D).
+    predictionBlock(diff, selA, selB),
+    `<table>
+      <thead><tr><th>Probe</th><th>${esc(displayName(selA))}</th><th>${esc(displayName(selB))}</th></tr></thead>
       <tbody>${diff.probes.map(diffRow).join("")}</tbody>
-    </table>`;
+    </table>`,
+  ]);
+}
+
+// shortCommit abbreviates a pinned commit SHA for the header (harden-detective-gates
+// D-H): the first 8 hex chars, git's conventional short form. A shorter/blank value
+// passes through unchanged.
+function shortCommit(sha) {
+  const s = String(sha || "");
+  return s.length > 8 ? s.slice(0, 8) : s;
+}
+
+// reproSignal formats the computed repro rate as raw counts — "reproduced 2/3"
+// (harden-detective-gates D-I / case-board-ui): a determinism signal shown ONLY once
+// at least one repro-attempt run has closed (denominator ≥ 1), never asserted. An
+// empty denominator (no closed repro-attempt run yet, or fixed-check-only) yields no
+// signal.
+function reproSignal(rr) {
+  if (!rr) return "";
+  const reproduced = rr.reproduced || 0;
+  const denom = reproduced + (rr.not_reproduced || 0);
+  if (denom < 1) return "";
+  return `reproduced ${reproduced}/${denom}`;
+}
+
+// headerMeta renders the case's determinism signal and pinned commit beneath the
+// title (harden-detective-gates: the case header shows repro rate and pinned commit).
+// Both are optional; when neither is present the meta line is omitted.
+function headerMeta(sess) {
+  const repro = reproSignal(sess.repro_rate);
+  const parts = html([
+    repro ? `<span class="repro">${esc(repro)}</span>` : "",
+    sess.commit ? `<span class="commit mono">${esc(shortCommit(sess.commit))}</span>` : "",
+  ]);
+  return parts ? `<div class="case-meta">${parts}</div>` : "";
 }
 
 // caseHeader is the breadcrumb + title shared by detail and diff views. The
 // heading is the case title (the scannable identity), not the description
 // (add-case-titles: detail shows the title as the header). The daemon always sends
-// a non-empty title (real or derived), so the title field is authoritative here.
+// a non-empty title (real or derived), so the title field is authoritative here. The
+// repro-rate + commit meta line rides under the title (harden-detective-gates).
 function caseHeader(sess) {
   return `
     <div class="crumbs"><a href="#/cases">Cases</a> › #${esc(sess.id)}</div>
-    <h1>${esc(sess.title || "(untitled case)")}</h1>`;
+    <h1>${esc(sess.title || "(untitled case)")}</h1>
+    ${headerMeta(sess)}`;
 }
 
 export { caseHeader };

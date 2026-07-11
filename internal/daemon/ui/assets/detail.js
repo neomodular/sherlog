@@ -42,6 +42,55 @@ function chipFor(idx, id) {
   return hypChip(id, hypothesisColor(meta.index), meta.status);
 }
 
+// citation renders a killed/confirmed hypothesis's evidence citation as display
+// names — "Probe 1 · Run 2" — from the store's persisted evidence_probe_id /
+// evidence_run_id (harden-detective-gates D-B). It links the verdict to the run it
+// came from, beside the note. A hypothesis without a stored citation (legacy
+// kills/confirms that predate the gate, or an active suspect) renders nothing.
+function citation(h) {
+  if (!h.evidence_probe_id || !h.evidence_run_id) return "";
+  return `<span class="citation">${esc(displayName(h.evidence_probe_id))} · ${esc(
+    displayName(h.evidence_run_id)
+  )}</span>`;
+}
+
+// noteLine renders a hypothesis's evidence note and its citation together (the
+// citation sits "alongside the note", harden-detective-gates: verdicts show their
+// citation). Either may be absent; an entirely empty pair yields no element.
+function noteLine(h) {
+  const parts = [];
+  if (h.note) parts.push(esc(cleanStatement(h.note)));
+  const cite = citation(h);
+  if (cite) parts.push(cite);
+  return parts.length ? `<div class="note">${parts.join(" ")}</div>` : "";
+}
+
+// predictionPair renders a probe's discriminating prediction pair (if-true /
+// if-false) visually paired so the contrast reads at a glance (harden-detective-gates
+// D-A / case-board-ui). Both are escaped (probe text is untrusted). Called only when
+// at least one side is present; the store validates both-or-neither, so a legal
+// probe carries both — the "—" fallback only guards drifted data.
+function predictionPair(p) {
+  return `
+    <div class="prediction-pair">
+      <div class="pred if-true"><span class="pred-label">if true</span><span class="pred-text">${esc(
+        p.expected_if_true || "—"
+      )}</span></div>
+      <div class="pred if-false"><span class="pred-label">if false</span><span class="pred-text">${esc(
+        p.expected_if_false || "—"
+      )}</span></div>
+    </div>`;
+}
+
+// guardrailValue renders a solved case's guardrail as an inert type badge plus its
+// free-text ref (harden-detective-gates D-J). The ref is ALWAYS plain escaped text,
+// never a link: the board is GET-only with no external origins, so a guardrail ref
+// that happens to look like a URL is displayed, never fetched or made clickable.
+function guardrailValue(g) {
+  const ref = g.ref ? ` <span class="guardrail-ref">${esc(g.ref)}</span>` : "";
+  return `${badge("guardrail", g.type || "")}${ref}`;
+}
+
 // activeSource holds the current EventSource so navigating away can close it. A
 // lingering stream would otherwise hold a daemon subscriber slot per visited case.
 let activeSource = null;
@@ -121,6 +170,12 @@ function verdictPanel(sess, hyps, probes, runs, idx) {
     )
     .join("");
 
+  // Prevention references recorded with a solved close (harden-detective-gates
+  // D-J): a regression-test ref and/or a guardrail, both shown as inert text — the
+  // board never resolves, fetches, or executes them (local-only invariant).
+  const regressionRef = (r && r.regression_test_ref) || "";
+  const guardrail = r && r.guardrail;
+
   const facts = html([
     rootCause ? factRow("Root cause", esc(rootCause)) : "",
     fix ? factRow("Fix", esc(fix)) : "",
@@ -130,6 +185,8 @@ function verdictPanel(sess, hyps, probes, runs, idx) {
           `<span class="ev-chips">${probeChips}${runChips}</span>`
         )
       : "",
+    regressionRef ? factRow("Regression test", esc(regressionRef)) : "",
+    guardrail ? factRow("Guardrail", guardrailValue(guardrail)) : "",
   ]);
 
   return `
@@ -146,6 +203,101 @@ function verdictPanel(sess, hyps, probes, runs, idx) {
       ${win ? `<p class="verdict-statement">${esc(cleanStatement(win.statement))}</p>` : ""}
       ${facts ? `<div class="facts">${facts}</div>` : ""}
     </section>`;
+}
+
+// radiusVerdict renders a blast-radius hit's verdict as an inert badge
+// (add-blast-radius D-D). A hit the agent has not graded carries an empty verdict
+// and reads "unreviewed", so a partial review is never mistaken for a clean sweep.
+// The store enum (sibling-bug / safe / already-covered) doubles as the badge
+// palette class; a drifted value still renders as inert escaped text via badge().
+function radiusVerdict(v) {
+  const label = v || "unreviewed";
+  return badge(label, label);
+}
+
+// radiusHitRow renders one daemon-recorded sibling occurrence: its file:line as
+// inert monospace (loc → a span, never an anchor — the board is GET-only with no
+// external origins, so a hit is displayed, never fetched or linked), the trimmed
+// excerpt as escaped code, and the verdict badge with the agent's optional note.
+// Every field was recorded by the daemon's search; the UI only displays it.
+function radiusHitRow(h) {
+  const note = h.note
+    ? `<div class="note">${esc(h.note)}</div>`
+    : "";
+  return `
+    <tr>
+      <td>${loc(h.file, h.line)}</td>
+      <td><code class="radius-excerpt">${esc(h.excerpt || "")}</code></td>
+      <td>${radiusVerdict(h.verdict)}${note}</td>
+    </tr>`;
+}
+
+// RADIUS_PREVIEW is how many hits render before the rest fold behind the
+// "Show N more hits" expander. Graded hits always sort into the preview.
+const RADIUS_PREVIEW = 12;
+
+// radiusSection renders the blast radius — the daemon-executed sibling-occurrence
+// search recorded after a confirm (add-blast-radius D-A/D-C). It shows the agent's
+// regex pattern, every recorded hit (file:line + excerpt + verdict badge), the
+// unreviewed count (D-D — a partial review must never read as a clean sweep), and a
+// visible truncation notice when the hit cap was reached (D-B). The section is
+// omitted entirely when the session carries no radius (case-board-ui delta: no
+// radius → no section) so legacy and un-mapped cases are unchanged. Everything is
+// escaped and inert — the pattern and excerpts are agent/user text.
+function radiusSection(sess) {
+  const radius = sess.blast_radius;
+  if (!radius) return "";
+  const hits = radius.hits || [];
+  const unreviewed = hits.reduce((n, h) => n + (h.verdict ? 0 : 1), 0);
+
+  const note = radius.note ? `<div class="radius-note">${esc(radius.note)}</div>` : "";
+  // Truncation mirrors flood control: the cap is bounded and always disclosed, so a
+  // truncated hit list is never mistaken for the complete set (D-B).
+  const truncation = radius.truncated
+    ? `<div class="radius-truncation">${badge(
+        "truncated",
+        "truncated"
+      )}<span>Hit cap reached — some occurrences are not shown. Narrow the pattern and re-run.</span></div>`
+    : "";
+
+  // Long hit lists collapse (a 500-hit truncated search must stay scannable):
+  // graded hits surface first — a sibling-bug verdict must never hide below the
+  // fold — then the first RADIUS_PREVIEW rows render and the tail folds behind a
+  // native <details> expander labeled with the hidden count. No script handler,
+  // keyboard-accessible by default, content stays inert escaped text.
+  const ordered = hits
+    .filter((h) => h.verdict)
+    .concat(hits.filter((h) => !h.verdict));
+  const preview = ordered.slice(0, RADIUS_PREVIEW);
+  const rest = ordered.slice(RADIUS_PREVIEW);
+  const hitTable = (rows) =>
+    `<table><thead><tr><th>Location</th><th>Excerpt</th><th>Verdict</th></tr></thead><tbody>${rows
+      .map(radiusHitRow)
+      .join("")}</tbody></table>`;
+  const more = rest.length
+    ? `<details class="radius-more"><summary>Show ${rest.length} more hit${
+        rest.length === 1 ? "" : "s"
+      }</summary>${hitTable(rest)}</details>`
+    : "";
+  const body = hits.length
+    ? hitTable(preview) + more
+    : `<p class="empty">The search recorded no sibling sites.</p>`;
+
+  return html([
+    `<h2>Blast radius (${hits.length})</h2>`,
+    `<section class="radius">`,
+    `<div class="radius-head">`,
+    `<code class="radius-pattern">${esc(radius.pattern || "")}</code>`,
+    radius.searched_at
+      ? `<span class="radius-meta">searched ${esc(fmtDate(radius.searched_at))}</span>`
+      : "",
+    `<span class="radius-unreviewed ${unreviewed ? "pending" : ""}">${unreviewed} unreviewed</span>`,
+    `</div>`,
+    note,
+    truncation,
+    body,
+    `</section>`,
+  ]);
 }
 
 // suspectPanel renders one active/confirmed hypothesis card: a left-edge color bar
@@ -167,7 +319,7 @@ function suspectPanel(h, index) {
         color,
         h.status
       )} ${esc(cleanStatement(h.statement))} ${badge(h.status, statusLabel)}</div>
-      ${h.note ? `<div class="note">${esc(cleanStatement(h.note))}</div>` : ""}
+      ${noteLine(h)}
     </div>`;
 }
 
@@ -182,12 +334,17 @@ function ruledOutItem(h, index) {
       ${hypChip(h.id, hypothesisColor(index), "killed")}
       <span class="ro-statement">${esc(cleanStatement(h.statement))}</span>
       ${badge("killed", "ruled out")}
-      ${h.note ? `<div class="note">${esc(cleanStatement(h.note))}</div>` : ""}
+      ${noteLine(h)}
     </div>`;
 }
 
+// probeRow renders a probe's registry line. A probe carrying a discriminating
+// prediction pair (harden-detective-gates D-A) emits a second, full-width row
+// beneath it so if-true/if-false read paired under the probe; a prediction-less
+// probe (path tracer) renders the single row unchanged. The colspan matches the
+// five probes-table columns (Location, Probe, Hypothesis, Status, Note).
 function probeRow(p, idx) {
-  return `
+  const main = `
     <tr>
       <td>${loc(p.file, p.line)}</td>
       <td>${esc(displayName(p.id))}</td>
@@ -195,19 +352,35 @@ function probeRow(p, idx) {
       <td>${p.removed ? badge("closed", "removed") : badge("open", "live")}</td>
       <td>${esc(cleanStatement(p.note) || "")}</td>
     </tr>`;
+  const predicted = p.expected_if_true || p.expected_if_false;
+  const pred = predicted
+    ? `<tr class="probe-prediction"><td colspan="5">${predictionPair(p)}</td></tr>`
+    : "";
+  return main + pred;
 }
 
+// runRow renders a run's timeline line. A run carrying a recorded fix prediction
+// (harden-detective-gates D-D — stamped before the evidence returned) emits a
+// second, full-width row showing it, so the run detail reads the observed outcome
+// against the recorded claim. Prediction-less runs render the single row unchanged.
+// The colspan matches the four runs-table columns (Run, Verdict, Started, Closed).
 function runRow(r) {
   const status = r.closed_at
     ? badge("verdict", r.verdict || "closed")
     : badge("open", "open");
-  return `
+  const main = `
     <tr>
       <td>${esc(displayName(r.id))}</td>
       <td>${status}</td>
       <td>${fmtDate(r.started_at)}</td>
       <td>${r.closed_at ? fmtDate(r.closed_at) : "—"}</td>
     </tr>`;
+  const pred = r.prediction
+    ? `<tr class="run-prediction"><td colspan="4"><span class="pred-label">prediction</span> <span class="pred-text">${esc(
+        r.prediction
+      )}</span></td></tr>`
+    : "";
+  return main + pred;
 }
 
 // tailRow renders one evidence line for the live tail / evidence list. kindLabel
@@ -343,6 +516,11 @@ export async function renderDetail(view, id) {
     // Verdict panel leads when the case is solved; renders nothing on an open,
     // unconfirmed case (D3 — no empty panel).
     verdictPanel(sess, hyps, probes, runs, idx),
+
+    // Blast radius follows the verdict — the "where else does this bug live" map
+    // recorded after the confirm (add-blast-radius). Omitted when there is no
+    // radius, so open/legacy cases are unchanged.
+    radiusSection(sess),
 
     `<h2>Suspects (${hyps.length})</h2>`,
     active.length

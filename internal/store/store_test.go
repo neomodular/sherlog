@@ -15,12 +15,42 @@ import (
 
 func newTestStore(t *testing.T, opts ...Option) *Store {
 	t.Helper()
-	opts = append([]Option{WithRoot(t.TempDir())}, opts...)
-	s, err := New(opts...)
+	// Inject a no-op commit resolver by default so the suite never shells out to git
+	// nor depends on the test environment being a repository (D-H). A test that cares
+	// about commit pinning overrides this with its own WithCommitResolver (applied
+	// after, so it wins) or exercises gitCommit directly.
+	base := []Option{WithRoot(t.TempDir()), WithCommitResolver(func(string) string { return "" })}
+	s, err := New(append(base, opts...)...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return s
+}
+
+// confirmH1 runs the full valid confirm ceremony for h1 on a session that already
+// has a board: it registers a predicted probe on h1, opens and closes a reproduced
+// run, then confirms h1 citing that probe and run. It returns the run ID so callers
+// can reuse or extend the run history. Test helper for the many cases that need a
+// board-confirmed hypothesis before a solved close (harden-detective-gates D-B/D-C).
+func confirmH1(t *testing.T, s *Store, sessionID string) string {
+	t.Helper()
+	if _, err := s.RegisterProbe(sessionID, Probe{
+		ID: "pc", File: "x", Line: 1, HypothesisID: "h1",
+		ExpectedIfTrue: "fires", ExpectedIfFalse: "silent",
+	}); err != nil {
+		t.Fatalf("confirmH1 RegisterProbe: %v", err)
+	}
+	run, err := s.OpenRun(sessionID)
+	if err != nil {
+		t.Fatalf("confirmH1 OpenRun: %v", err)
+	}
+	if _, err := s.CloseRun(sessionID, run.ID, VerdictReproduced); err != nil {
+		t.Fatalf("confirmH1 CloseRun: %v", err)
+	}
+	if _, err := s.UpdateHypothesisWithEvidence(sessionID, "h1", HypothesisConfirmed, "confirmed by pc", "pc", run.ID); err != nil {
+		t.Fatalf("confirmH1 confirm: %v", err)
+	}
+	return run.ID
 }
 
 var idPattern = regexp.MustCompile(`^[0-9a-z]{8,}$`)
@@ -146,12 +176,28 @@ func TestHypothesisKilledWithEvidence(t *testing.T) {
 		t.Fatalf("board not initialised as expected: %+v", board)
 	}
 
-	updated, err := s.UpdateHypothesis(sess.ID, "h2", HypothesisKilled, "p4 showed cache fresh in run 1")
+	// A kill needs an evidence citation (D-B): register p4 (which fired zero times —
+	// "fired zero times" is valid evidence) and close a run, then kill h2 citing them.
+	if _, err := s.RegisterProbe(sess.ID, Probe{ID: "p4", File: "cache.js", Line: 12, HypothesisID: "h2"}); err != nil {
+		t.Fatalf("RegisterProbe: %v", err)
+	}
+	run, err := s.OpenRun(sess.ID)
 	if err != nil {
-		t.Fatalf("UpdateHypothesis: %v", err)
+		t.Fatalf("OpenRun: %v", err)
+	}
+	if _, err := s.CloseRun(sess.ID, run.ID, VerdictReproduced); err != nil {
+		t.Fatalf("CloseRun: %v", err)
+	}
+
+	updated, err := s.UpdateHypothesisWithEvidence(sess.ID, "h2", HypothesisKilled, "p4 showed cache fresh in run 1", "p4", run.ID)
+	if err != nil {
+		t.Fatalf("UpdateHypothesisWithEvidence: %v", err)
 	}
 	if updated.Status != HypothesisKilled || updated.Note != "p4 showed cache fresh in run 1" {
 		t.Errorf("update not applied: %+v", updated)
+	}
+	if updated.EvidenceProbeID != "p4" || updated.EvidenceRunID != run.ID {
+		t.Errorf("citation not recorded on kill: %+v", updated)
 	}
 
 	read, err := s.GetSession(sess.ID)
@@ -160,6 +206,9 @@ func TestHypothesisKilledWithEvidence(t *testing.T) {
 	}
 	if read.Hypotheses[1].Status != HypothesisKilled || read.Hypotheses[1].Note == "" {
 		t.Errorf("subsequent read does not show kill+note: %+v", read.Hypotheses[1])
+	}
+	if read.Hypotheses[1].EvidenceProbeID != "p4" || read.Hypotheses[1].EvidenceRunID != run.ID {
+		t.Errorf("citation not persisted: %+v", read.Hypotheses[1])
 	}
 }
 
@@ -240,7 +289,7 @@ func TestResumeLatest(t *testing.T) {
 
 	old, _, _ := s.CreateSession("", "old bug", "/repo/old")
 	newer, _, _ := s.CreateSession("", "new bug", "/repo/new")
-	s.SetHypotheses(newer.ID, []string{"suspect 1"})
+	s.SetHypotheses(newer.ID, []string{"suspect 1", "suspect 2", "suspect 3"})
 
 	got, err := s.ResumeLatest()
 	if err != nil {
@@ -249,7 +298,7 @@ func TestResumeLatest(t *testing.T) {
 	if got.ID != newer.ID {
 		t.Errorf("expected most recent session %q, got %q", newer.ID, got.ID)
 	}
-	if len(got.Hypotheses) != 1 {
+	if len(got.Hypotheses) != 3 {
 		t.Errorf("resumed state missing hypotheses: %+v", got)
 	}
 
@@ -276,7 +325,6 @@ func TestRestartRecovery(t *testing.T) {
 
 	sess, _, _ := s1.CreateSession("", "intermittent 500", "/repo")
 	s1.SetHypotheses(sess.ID, []string{"race", "cache", "config"})
-	s1.UpdateHypothesis(sess.ID, "h1", HypothesisKilled, "ruled out in run 1")
 	s1.RegisterProbe(sess.ID, Probe{ID: "p1", File: "auth.js", Line: 45, HypothesisID: "h1"})
 	run, _ := s1.OpenRun(sess.ID)
 	for i := 0; i < 5; i++ {
@@ -285,6 +333,11 @@ func TestRestartRecovery(t *testing.T) {
 		}
 	}
 	s1.CloseRun(sess.ID, run.ID, VerdictReproduced)
+	// Kill after the run closes so the citation is valid (D-B): cite p1 in the now
+	// closed run r1.
+	if _, err := s1.UpdateHypothesisWithEvidence(sess.ID, "h1", HypothesisKilled, "ruled out in run 1", "p1", run.ID); err != nil {
+		t.Fatalf("UpdateHypothesisWithEvidence: %v", err)
+	}
 
 	// Simulate restart: brand new Store over the same root.
 	s2, err := New(WithRoot(root))
@@ -476,7 +529,8 @@ func TestRunVerdictAndReattach(t *testing.T) {
 	if _, ok, err := s.LatestOpenRun(sess.ID); err != nil || ok {
 		t.Errorf("no run yet: ok=%v err=%v", ok, err)
 	}
-	run, _ := s.OpenRun(sess.ID)
+	// Open with a fix prediction so the fixed-check close below is permitted (D-D).
+	run, _ := s.OpenOrAttachRunWithPrediction(sess.ID, "p1 goes quiet after the fix")
 	got, ok, err := s.LatestOpenRun(sess.ID)
 	if err != nil || !ok || got.ID != run.ID {
 		t.Errorf("re-attach failed: got=%+v ok=%v err=%v", got, ok, err)

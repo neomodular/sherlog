@@ -130,6 +130,11 @@ type Store struct {
 	root   string
 	floodN int
 
+	// resolveCommit pins the repository commit at session creation (D-H). It is a
+	// field so tests inject a deterministic resolver and never depend on the test
+	// environment being a git repository; the default is the real gitCommit.
+	resolveCommit func(cwd string) string
+
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
 	counters ingestCounters // activity facts for the health view (add-health-page D2)
@@ -159,10 +164,21 @@ func WithFloodN(n int) Option {
 	}
 }
 
+// WithCommitResolver overrides how a session's commit SHA is resolved at creation
+// (D-H). Tests inject a deterministic resolver so the suite never shells out to git
+// nor assumes the test environment is a repository; the default is gitCommit.
+func WithCommitResolver(fn func(cwd string) string) Option {
+	return func(s *Store) {
+		if fn != nil {
+			s.resolveCommit = fn
+		}
+	}
+}
+
 // New creates a Store and recovers all persisted sessions from disk (D5: state
 // survives daemon restart). The default root is ~/.sherlog.
 func New(opts ...Option) (*Store, error) {
-	s := &Store{floodN: DefaultFloodN, sessions: map[string]*sessionEntry{}}
+	s := &Store{floodN: DefaultFloodN, sessions: map[string]*sessionEntry{}, resolveCommit: gitCommit}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -201,6 +217,11 @@ func (s *Store) Root() string { return s.root }
 // cwd it is returned so the caller can warn the user; the new session is still
 // created (concurrent sessions are allowed, D-risks).
 func (s *Store) CreateSession(title, description, cwd string) (created *Session, existingSameCWD *Session, err error) {
+	// Resolve the commit BEFORE taking the lock: the git invocation can take up to
+	// its timeout, and holding s.mu across it would stall every other store
+	// operation (ingest, the await poll loop) for that whole window (D-H).
+	commit := s.resolveCommit(cwd)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -218,6 +239,7 @@ func (s *Store) CreateSession(title, description, cwd string) (created *Session,
 		Title:       strings.TrimSpace(title),
 		Description: description,
 		CWD:         cwd,
+		Commit:      commit, // best-effort pinned commit (D-H); empty when unavailable
 		CreatedAt:   time.Now().UTC(),
 		Hypotheses:  []Hypothesis{},
 		Probes:      []Probe{},
@@ -258,10 +280,24 @@ func (s *Store) CloseSessionWithResolution(id string, res *Resolution) (unremove
 
 	newlyClosed := false
 	if entry.session.ClosedAt == nil {
+		// Validate a solved close BEFORE any mutation (D-F): a rejection returns an
+		// error and leaves the session OPEN — never a silent downgrade to unsolved. A
+		// nil/empty resolution is an unsolved close and skips validation entirely.
+		// Validation runs only on the actual open→closed transition; an already-closed
+		// session is idempotent (below) and ignores the supplied resolution, so there
+		// is nothing to validate on a re-close.
+		if res != nil && !res.IsEmpty() {
+			if err := validateResolutionLocked(entry.session, res); err != nil {
+				s.mu.Unlock()
+				return nil, fmt.Errorf("close session %q: %w", id, err)
+			}
+		}
+
 		now := time.Now().UTC()
 		entry.session.ClosedAt = &now
-		// An all-empty resolution is an unsolved close: keep Resolution nil so recall
-		// never matches a case that recorded no root cause (session-state spec).
+		// A non-empty resolution has already passed validation above; an all-empty
+		// resolution is an unsolved close, keeping Resolution nil so recall never
+		// matches a case that recorded no root cause (session-state spec).
 		if res != nil && !res.IsEmpty() {
 			r := *res
 			r.ClosedAt = now
@@ -356,7 +392,14 @@ func (s *Store) ResumeLatest() (*Session, error) {
 
 // SetHypotheses replaces the session's board with the given statements, assigning
 // sequential IDs (h1, h2, ...) and status active. This backs set_hypotheses (D9).
+// A board of fewer than three suspects is rejected (D-E) and the existing board is
+// left unchanged — replace semantics are preserved, so a mid-investigation split
+// must still resubmit the full board of at least three.
 func (s *Store) SetHypotheses(sessionID string, statements []string) ([]Hypothesis, error) {
+	if len(statements) < minHypotheses {
+		return nil, fmt.Errorf("set hypotheses for %q: %w — got %d, name at least three distinct suspects", sessionID, ErrInsufficientHypotheses, len(statements))
+	}
+
 	s.mu.Lock()
 
 	entry, ok := s.sessions[sessionID]
@@ -389,9 +432,31 @@ func (s *Store) SetHypotheses(sessionID string, statements []string) ([]Hypothes
 	return out, nil
 }
 
-// UpdateHypothesis sets a hypothesis's status and evidence note (D6). The note
-// records why a suspect was killed or confirmed.
+// UpdateHypothesis sets a hypothesis's status and evidence note (D6). It is the
+// no-citation form: a transition to active (refine) carries no citation and is
+// accepted, while a kill or confirm is rejected by the evidence-citation gate
+// (D-B) because it supplies no citation. Callers that kill or confirm must use
+// UpdateHypothesisWithEvidence.
 func (s *Store) UpdateHypothesis(sessionID, hypothesisID string, status HypothesisStatus, note string) (Hypothesis, error) {
+	return s.UpdateHypothesisWithEvidence(sessionID, hypothesisID, status, note, "", "")
+}
+
+// UpdateHypothesisWithEvidence sets a hypothesis's status, note, and — for a kill
+// or confirm — the evidence citation the store cross-checks before accepting the
+// transition (harden-detective-gates D-B, D-C). A transition to active requires no
+// citation. For killed/confirmed the store validates that the cited probe is
+// registered and the cited run exists and is closed with a verdict; a confirm
+// additionally requires at least one reproduced run in the session and a cited
+// probe carrying a prediction pair. On any gate failure the board is left
+// unchanged (fail before mutating). The accepted citation persists on the
+// hypothesis alongside the free-text note.
+func (s *Store) UpdateHypothesisWithEvidence(sessionID, hypothesisID string, status HypothesisStatus, note, evidenceProbeID, evidenceRunID string) (Hypothesis, error) {
+	// Pure input validation, like SetHypotheses' board floor: an unknown status must
+	// never reach the board — it would sidestep the kill/confirm citation gates below.
+	if err := validateHypothesisStatus(status); err != nil {
+		return Hypothesis{}, fmt.Errorf("update hypothesis %q in %q: %w", hypothesisID, sessionID, err)
+	}
+
 	s.mu.Lock()
 
 	entry, ok := s.sessions[sessionID]
@@ -400,28 +465,42 @@ func (s *Store) UpdateHypothesis(sessionID, hypothesisID string, status Hypothes
 		return Hypothesis{}, fmt.Errorf("update hypothesis in %q: %w", sessionID, ErrSessionNotFound)
 	}
 
-	for i := range entry.session.Hypotheses {
-		h := &entry.session.Hypotheses[i]
-		if h.ID != hypothesisID {
-			continue
-		}
-		h.Status = status
-		if note != "" {
-			h.Note = note
-		}
-		h.UpdatedAt = time.Now().UTC()
-		if err := s.writeState(entry.session); err != nil {
-			s.mu.Unlock()
-			return Hypothesis{}, err
-		}
-		updated := *h
+	// Resolve the hypothesis before validating the citation so an unknown hypothesis
+	// or session reports its own error rather than a citation error (stable error
+	// precedence: session → hypothesis → citation).
+	h := findHypothesis(entry.session, hypothesisID)
+	if h == nil {
 		s.mu.Unlock()
-
-		s.publish(Event{Kind: EventBoard, Session: sessionID, Payload: updated})
-		return updated, nil
+		return Hypothesis{}, fmt.Errorf("update hypothesis %q in %q: %w", hypothesisID, sessionID, ErrHypothesisNotFound)
 	}
+
+	cite := status == HypothesisKilled || status == HypothesisConfirmed
+	if cite {
+		if err := validateCitationLocked(entry.session, status, evidenceProbeID, evidenceRunID); err != nil {
+			s.mu.Unlock()
+			return Hypothesis{}, fmt.Errorf("update hypothesis %q in %q: %w", hypothesisID, sessionID, err)
+		}
+	}
+
+	h.Status = status
+	if note != "" {
+		h.Note = note
+	}
+	if cite {
+		// Persist the validated citation alongside the note (D-B).
+		h.EvidenceProbeID = evidenceProbeID
+		h.EvidenceRunID = evidenceRunID
+	}
+	h.UpdatedAt = time.Now().UTC()
+	if err := s.writeState(entry.session); err != nil {
+		s.mu.Unlock()
+		return Hypothesis{}, err
+	}
+	updated := *h
 	s.mu.Unlock()
-	return Hypothesis{}, fmt.Errorf("update hypothesis %q in %q: %w", hypothesisID, sessionID, ErrHypothesisNotFound)
+
+	s.publish(Event{Kind: EventBoard, Session: sessionID, Payload: updated})
+	return updated, nil
 }
 
 // ErrHypothesisNotFound is returned when a hypothesis ID is unknown in a session.
@@ -430,8 +509,15 @@ var ErrHypothesisNotFound = errors.New("hypothesis not found")
 // --- Probe registry (spec: Probe registry) ---
 
 // RegisterProbe records a placed probe so cleanup is guaranteed findable (D10).
-// Re-registering an existing probe ID updates it in place.
+// Re-registering an existing probe ID updates it in place. The optional prediction
+// pair is validated (D-A: both-or-neither, and non-equal when present) before the
+// probe is stored; the file/line existence check lives in the daemon, which alone
+// reliably knows the session cwd (D-G).
 func (s *Store) RegisterProbe(sessionID string, p Probe) (Probe, error) {
+	if err := validatePredictionPair(p.ExpectedIfTrue, p.ExpectedIfFalse); err != nil {
+		return Probe{}, fmt.Errorf("register probe in %q: %w", sessionID, err)
+	}
+
 	s.mu.Lock()
 
 	entry, ok := s.sessions[sessionID]
@@ -544,7 +630,7 @@ func (s *Store) OpenRun(sessionID string) (Run, error) {
 		s.mu.Unlock()
 		return Run{}, fmt.Errorf("open run in %q: %w", sessionID, ErrSessionNotFound)
 	}
-	run, err := s.openNewRunLocked(entry)
+	run, err := s.openNewRunLocked(entry, "")
 	s.mu.Unlock()
 	if err != nil {
 		return Run{}, err
@@ -557,8 +643,21 @@ func (s *Store) OpenRun(sessionID string) (Run, error) {
 // OpenOrAttachRun returns the session's latest open run, or opens a new one if
 // none is open — atomically, under a single critical section. await uses this so
 // concurrent calls on a session with no open run converge on one run instead of
-// each opening its own (the LatestOpenRun+OpenRun pair was TOCTOU-racy, D8).
+// each opening its own (the LatestOpenRun+OpenRun pair was TOCTOU-racy, D8). This
+// is the no-prediction form; use OpenOrAttachRunWithPrediction to stamp a fix
+// prediction (D-D).
 func (s *Store) OpenOrAttachRun(sessionID string) (Run, error) {
+	return s.OpenOrAttachRunWithPrediction(sessionID, "")
+}
+
+// OpenOrAttachRunWithPrediction opens (or atomically re-attaches to) the session's
+// latest run and stamps an optional fix prediction on it (harden-detective-gates
+// D-D). The prediction is recorded at call receipt — before any evidence summary
+// is returned — and only when the run does not already carry one: it is immutable
+// once set, so supplying a prediction on a re-attach whose run has none is
+// accepted, while overwriting an existing one is silently ignored. A fixed-check
+// close later requires this prediction to be present (CloseRun / CloseLatestOpenRun).
+func (s *Store) OpenOrAttachRunWithPrediction(sessionID, prediction string) (Run, error) {
 	s.mu.Lock()
 
 	entry, ok := s.sessions[sessionID]
@@ -570,14 +669,33 @@ func (s *Store) OpenOrAttachRun(sessionID string) (Run, error) {
 	for i := len(entry.session.Runs) - 1; i >= 0; i-- {
 		if entry.session.Runs[i].ClosedAt == nil {
 			// Re-attach to the open run: adoption happens only at open, never on
-			// re-attach (fix-prerun D1), so this path must not adopt — and nothing
-			// changed, so no run event is published.
-			run := entry.session.Runs[i]
+			// re-attach (fix-prerun D1), so this path must not adopt.
+			r := &entry.session.Runs[i]
+			// Stamp the prediction only if the run has none yet (immutable once set,
+			// D-D). Persist + publish only when a stamp actually happened; otherwise
+			// nothing changed, so no run event is published.
+			if prediction != "" && r.Prediction == "" {
+				now := time.Now().UTC()
+				r.Prediction = prediction
+				r.PredictionAt = &now
+				if err := s.writeState(entry.session); err != nil {
+					// Roll back the stamp so a failed persist leaves no phantom prediction.
+					r.Prediction = ""
+					r.PredictionAt = nil
+					s.mu.Unlock()
+					return Run{}, err
+				}
+				run := *r
+				s.mu.Unlock()
+				s.publish(Event{Kind: EventRun, Session: sessionID, Payload: run})
+				return run, nil
+			}
+			run := *r
 			s.mu.Unlock()
 			return run, nil
 		}
 	}
-	run, err := s.openNewRunLocked(entry)
+	run, err := s.openNewRunLocked(entry, prediction)
 	s.mu.Unlock()
 	if err != nil {
 		return Run{}, err
@@ -592,11 +710,17 @@ func (s *Store) OpenOrAttachRun(sessionID string) (Run, error) {
 // marker is written before the in-memory mutation so a marker-write failure can
 // abort the open with memory and disk still in agreement. It is the single
 // new-run path shared by OpenRun and OpenOrAttachRun so adoption can never be
-// bypassed by one entry point. Callers hold s.mu.
-func (s *Store) openNewRunLocked(entry *sessionEntry) (Run, error) {
+// bypassed by one entry point. A non-empty prediction is stamped on the run at
+// creation with a PredictionAt timestamp (D-D). Callers hold s.mu.
+func (s *Store) openNewRunLocked(entry *sessionEntry, prediction string) (Run, error) {
 	now := time.Now().UTC()
 	entry.nextRun++
 	run := Run{ID: "r" + strconv.Itoa(entry.nextRun), StartedAt: now}
+	if prediction != "" {
+		run.Prediction = prediction
+		predAt := now
+		run.PredictionAt = &predAt
+	}
 	entry.session.Runs = append(entry.session.Runs, run)
 	if err := s.writeState(entry.session); err != nil {
 		// Roll back the in-memory run so a failed persist does not leave a
@@ -671,6 +795,13 @@ func (s *Store) CloseRun(sessionID, runID string, verdict RunVerdict) (Run, erro
 		if r.ID != runID {
 			continue
 		}
+		// A fixed-check verdict requires a fix prediction recorded before the evidence
+		// was returned (D-D): reject before mutating so the run stays open for a
+		// re-await that supplies the prediction.
+		if verdict == VerdictFixedCheck && r.Prediction == "" {
+			s.mu.Unlock()
+			return Run{}, fmt.Errorf("close run %q in %q: %w — re-await with a prediction and have the user reproduce once more", runID, sessionID, ErrFixedCheckNeedsPrediction)
+		}
 		if r.ClosedAt == nil {
 			now := time.Now().UTC()
 			r.ClosedAt = &now
@@ -726,6 +857,13 @@ func (s *Store) CloseLatestOpenRun(sessionID string, verdict RunVerdict) (Run, e
 		r := &entry.session.Runs[i]
 		if r.ClosedAt != nil {
 			continue
+		}
+		// A fixed-check verdict requires a prediction recorded before evidence
+		// returned (D-D): reject before mutating so the run stays open for a re-await.
+		if verdict == VerdictFixedCheck && r.Prediction == "" {
+			runID := r.ID
+			s.mu.Unlock()
+			return Run{}, fmt.Errorf("close latest open run %q in %q: %w — re-await with a prediction and have the user reproduce once more", runID, sessionID, ErrFixedCheckNeedsPrediction)
 		}
 		now := time.Now().UTC()
 		r.ClosedAt = &now
@@ -1032,7 +1170,14 @@ func cloneSession(in *Session) *Session {
 	}
 	if in.Resolution != nil {
 		r := *in.Resolution
+		if in.Resolution.Guardrail != nil {
+			g := *in.Resolution.Guardrail
+			r.Guardrail = &g
+		}
 		out.Resolution = &r
+	}
+	if in.BlastRadius != nil {
+		out.BlastRadius = cloneBlastRadius(in.BlastRadius)
 	}
 	out.Hypotheses = cloneHypotheses(in.Hypotheses)
 	out.Probes = append([]Probe(nil), in.Probes...)
@@ -1057,6 +1202,10 @@ func cloneRuns(in []Run) []Run {
 		if r.ClosedAt != nil {
 			t := *r.ClosedAt
 			out[i].ClosedAt = &t
+		}
+		if r.PredictionAt != nil {
+			t := *r.PredictionAt
+			out[i].PredictionAt = &t
 		}
 	}
 	return out

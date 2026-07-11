@@ -42,12 +42,15 @@ func newAwaitEngine(s *store.Store, debounce, maxTimeout time.Duration) *awaitEn
 }
 
 // awaitResult is what an await call resolves to: the run it attached to, the
-// per-probe summary for that run, and how it ended.
+// per-probe summary for that run, how it ended, and the session's computed repro
+// rate (harden-detective-gates D-I) so the agent and user see a computed — not
+// asserted — determinism signal with its raw counts.
 type awaitResult struct {
 	Run       store.Run            `json:"run"`
 	Summary   []store.ProbeSummary `json:"summary"`
 	Reason    string               `json:"reason"`     // "quiet", "timeout", or "deadline"
 	TotalSeen int                  `json:"total_seen"` // events observed in the run during this wait
+	ReproRate store.ReproRate      `json:"repro_rate"` // reproduced / (reproduced + not-reproduced), with counts
 }
 
 // await opens a run (or re-attaches to the session's already-open run, D8) and
@@ -60,11 +63,14 @@ type awaitResult struct {
 // the debounce rather than the full timeout. With no activity at all — neither
 // adopted nor live — it returns at timeout reporting zero events so the skill can
 // run a connectivity check.
-func (e *awaitEngine) await(ctx context.Context, sessionID string, timeout time.Duration) (awaitResult, error) {
+func (e *awaitEngine) await(ctx context.Context, sessionID string, timeout time.Duration, prediction string) (awaitResult, error) {
 	// Atomically open a run or re-attach to the session's already-open one, so
 	// re-invocation while a run is open is idempotent and concurrent awaits
-	// converge on the same run (D8).
-	run, err := e.store.OpenOrAttachRun(sessionID)
+	// converge on the same run (D8). The optional fix prediction is stamped here, at
+	// call receipt — before any summary is returned — and is immutable once set
+	// (harden-detective-gates D-D): supplying one on a re-attach whose run has none
+	// records it; overwriting an existing one is ignored by the store.
+	run, err := e.store.OpenOrAttachRunWithPrediction(sessionID, prediction)
 	if err != nil {
 		return awaitResult{}, err
 	}
@@ -132,7 +138,15 @@ func (e *awaitEngine) finish(sessionID string, run store.Run, baseline int, reas
 	}
 	summary = mergeRegisteredProbes(summary, sess.Probes, run.ID)
 
-	return awaitResult{Run: run, Summary: summary, Reason: reason, TotalSeen: total - baseline}, nil
+	// The repro rate is computed from the session's run verdicts at read time, never
+	// stored (harden-detective-gates D-I); reuse the session snapshot already fetched.
+	return awaitResult{
+		Run:       run,
+		Summary:   summary,
+		Reason:    reason,
+		TotalSeen: total - baseline,
+		ReproRate: store.ComputeReproRate(sess.Runs),
+	}, nil
 }
 
 // mergeRegisteredProbes appends a zero-count ProbeSummary for every registered

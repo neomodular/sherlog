@@ -87,11 +87,15 @@ func (s *Store) Recall(query string) []RecallMatch {
 }
 
 // searchableText is the corpus recall scores a closed case against (design D5):
-// its title, bug description, recorded root cause, and the confirmed hypothesis's
-// statement when one is identified. The title joins the corpus because titles are
-// short, high-signal tokens (add-case-titles D5); effectiveTitle is used so a
-// title-less legacy case still contributes its derived summary. Joined with spaces
-// so tokenization sees them as one bag of words.
+// its title, bug description, recorded root cause, the confirmed hypothesis's
+// statement when one is identified, and — for a case carrying a blast radius — the
+// radius pattern text (add-blast-radius D-F). The title joins the corpus because
+// titles are short, high-signal tokens (add-case-titles D5); effectiveTitle is used
+// so a title-less legacy case still contributes its derived summary. The radius
+// pattern joins so a future investigation can match on the defect mechanism itself,
+// not just the symptom prose; only the pattern is indexed — hit file *paths* are
+// deliberately excluded, since paths are noise across projects (D-F). Joined with
+// spaces so tokenization sees them as one bag of words.
 func searchableText(sess *Session) string {
 	parts := []string{effectiveTitle(sess), sess.Description}
 	if sess.Resolution != nil {
@@ -104,6 +108,13 @@ func searchableText(sess *Session) string {
 				}
 			}
 		}
+	}
+	// The blast radius pattern joins the corpus so a future case can recall this one
+	// by the anti-pattern it hunted (D-F). Hit files (sess.BlastRadius.Hits[].File)
+	// are intentionally never added — indexing paths would produce cross-project
+	// noise and let a bare path mention manufacture a spurious match.
+	if sess.BlastRadius != nil {
+		parts = append(parts, sess.BlastRadius.Pattern)
 	}
 	return strings.Join(parts, " ")
 }

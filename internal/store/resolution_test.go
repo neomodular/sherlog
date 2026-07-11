@@ -17,8 +17,16 @@ func TestResolutionPersistsAndSurvivesRestart(t *testing.T) {
 		t.Fatalf("New s1: %v", err)
 	}
 	sess, _, _ := s1.CreateSession("", "discount totals wrong", "/repo")
-	s1.SetHypotheses(sess.ID, []string{"float rounding", "cache stale"})
-	s1.UpdateHypothesis(sess.ID, "h1", HypothesisConfirmed, "p1 showed .005 rounding")
+	if _, err := s1.SetHypotheses(sess.ID, []string{"float rounding", "cache stale", "config drift"}); err != nil {
+		t.Fatalf("SetHypotheses: %v", err)
+	}
+	// A solved close now requires h1 confirmed on the board with evidence (D-F).
+	confirmH1(t, s1, sess.ID)
+	// The confirm ceremony registers probe pc; remove it so the unremoved-probe
+	// assertion below still verifies a clean close.
+	if err := s1.RemoveProbe(sess.ID, "pc"); err != nil {
+		t.Fatalf("RemoveProbe: %v", err)
+	}
 
 	res := &Resolution{
 		RootCause:             "float rounding in discount calc",
@@ -30,7 +38,7 @@ func TestResolutionPersistsAndSurvivesRestart(t *testing.T) {
 		t.Fatalf("CloseSessionWithResolution: %v", err)
 	}
 	if len(unremoved) != 0 {
-		t.Errorf("no probes registered, expected none unremoved: %+v", unremoved)
+		t.Errorf("all probes removed, expected none unremoved: %+v", unremoved)
 	}
 
 	// Read back from the same store.
@@ -102,11 +110,22 @@ func TestCloseUnsolvedHasNoResolution(t *testing.T) {
 func TestCloseResolutionIdempotent(t *testing.T) {
 	s := newTestStore(t)
 	sess, _, _ := s.CreateSession("", "idempotent", "/repo")
-	if _, err := s.CloseSessionWithResolution(sess.ID, &Resolution{RootCause: "first"}); err != nil {
+	if _, err := s.SetHypotheses(sess.ID, []string{"a", "b", "c"}); err != nil {
+		t.Fatalf("SetHypotheses: %v", err)
+	}
+	confirmH1(t, s, sess.ID)
+
+	if _, err := s.CloseSessionWithResolution(sess.ID, &Resolution{
+		RootCause: "first", FixSummary: "the first fix", ConfirmedHypothesisID: "h1",
+	}); err != nil {
 		t.Fatalf("first close: %v", err)
 	}
-	// A second close (with a different resolution, or none) must not overwrite.
-	if _, err := s.CloseSessionWithResolution(sess.ID, &Resolution{RootCause: "second"}); err != nil {
+	// A second close must not overwrite the recorded resolution. The session is
+	// already closed, so the re-close is idempotent and the supplied resolution is
+	// ignored (no validation on a re-close, no mutation).
+	if _, err := s.CloseSessionWithResolution(sess.ID, &Resolution{
+		RootCause: "second", FixSummary: "the second fix", ConfirmedHypothesisID: "h1",
+	}); err != nil {
 		t.Fatalf("second close: %v", err)
 	}
 	if _, err := s.CloseSession(sess.ID); err != nil {

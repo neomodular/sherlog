@@ -36,6 +36,12 @@ const (
 // reconstructable by debug_resume (D5, D6).
 type Session struct {
 	ID string `json:"id"` // short random base36 token (D4)
+	// Commit is the repository commit SHA resolved from CWD at session creation
+	// (harden-detective-gates D-H). It is best-effort: a cwd outside any git work
+	// tree, a missing git binary, or a resolve timeout leaves it empty and never
+	// blocks a session. Recording only — no gate consumes it. Additive and backward
+	// compatible: pre-change state files load with it blank (Migration Plan).
+	Commit string `json:"commit,omitempty"`
 	// Title is a short, scannable case identity shown wherever a case is referenced
 	// — lists, detail header, banner, recall, resume (add-case-titles D1/D3). It is
 	// agent-authored at debug_start; an empty stored title (legacy state files, or a
@@ -55,6 +61,13 @@ type Session struct {
 	// still open or closed-unsolved; older state files predate the field and load
 	// with it nil (backward-compatible additive field, Migration Plan).
 	Resolution *Resolution `json:"resolution,omitempty"`
+	// BlastRadius is the session's single daemon-executed sibling-occurrence search
+	// (add-blast-radius D-A/D-E). It is set only after a hypothesis is confirmed and
+	// the search covers the confirmed culprit (the false-coverage gate, D-C); a
+	// re-run replaces it whole, clearing annotations. nil means no radius was mapped.
+	// Additive and backward compatible: pre-change state files load with it absent and
+	// are never rewritten (Migration Plan).
+	BlastRadius *BlastRadius `json:"blast_radius,omitempty"`
 }
 
 // Resolution is the outcome recorded when a case closes solved (D4): the root
@@ -67,13 +80,43 @@ type Resolution struct {
 	FixSummary            string    `json:"fix_summary,omitempty"`
 	ConfirmedHypothesisID string    `json:"confirmed_hypothesis_id,omitempty"`
 	ClosedAt              time.Time `json:"closed_at"`
+	// RegressionTestRef and Guardrail are optional prevention references recorded
+	// with a solved close (harden-detective-gates D-J). They are displayed on the
+	// closed-case view and never resolved, fetched, or executed — sherlog is
+	// local-only. Both are additive and backward compatible: pre-change state files
+	// load with them absent.
+	RegressionTestRef string     `json:"regression_test_ref,omitempty"`
+	Guardrail         *Guardrail `json:"guardrail,omitempty"`
+}
+
+// Guardrail is a recorded (never executed) prevention control for a solved case
+// (harden-detective-gates D-J). Type is one of test, lint, alert, doc — validated
+// at close; Ref is free text (a rule name, alert id, doc path, …).
+type Guardrail struct {
+	Type string `json:"type"`
+	Ref  string `json:"ref,omitempty"`
+}
+
+// guardrailTypes is the closed set of allowed guardrail types (D-J). Kept as a set
+// so validation is a single membership check and the error can name the whole set.
+var guardrailTypes = map[string]struct{}{
+	"test": {}, "lint": {}, "alert": {}, "doc": {},
+}
+
+// validGuardrailType reports whether t is one of the allowed guardrail types.
+func validGuardrailType(t string) bool {
+	_, ok := guardrailTypes[t]
+	return ok
 }
 
 // IsEmpty reports whether a resolution carries no substantive content — every
-// text field blank. CloseSessionWithResolution treats an all-empty resolution as
-// an unsolved close so a case is never recorded as solved with nothing to show.
+// field blank (including the prevention references). CloseSessionWithResolution
+// treats an all-empty resolution as an unsolved close so a case is never recorded
+// as solved with nothing to show, and so the solved-close validation (D-F) only
+// fires when the caller actually supplied a resolution field.
 func (r Resolution) IsEmpty() bool {
-	return r.RootCause == "" && r.FixSummary == "" && r.ConfirmedHypothesisID == ""
+	return r.RootCause == "" && r.FixSummary == "" && r.ConfirmedHypothesisID == "" &&
+		r.RegressionTestRef == "" && r.Guardrail == nil
 }
 
 // Hypothesis is a suspect on the board with its current status and the evidence
@@ -83,20 +126,36 @@ type Hypothesis struct {
 	Statement string           `json:"statement"`
 	Status    HypothesisStatus `json:"status"`
 	Note      string           `json:"note,omitempty"` // latest evidence note
-	CreatedAt time.Time        `json:"created_at"`
-	UpdatedAt time.Time        `json:"updated_at"`
+	// EvidenceProbeID and EvidenceRunID are the citation recorded when a hypothesis
+	// is killed or confirmed (harden-detective-gates D-B): the probe and closed run
+	// whose evidence justified the verdict. The store cross-checks them against its
+	// own registry before accepting the transition, then persists them alongside the
+	// free-text note. Empty for suspects still active. Additive and backward
+	// compatible: pre-change kills/confirms load with them absent.
+	EvidenceProbeID string    `json:"evidence_probe_id,omitempty"`
+	EvidenceRunID   string    `json:"evidence_run_id,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // Probe is a registry entry for one placed probe line. The Removed flag backs
 // the cleanup guarantee: debug_end reports every probe whose flag is unset (D10).
 type Probe struct {
-	ID           string    `json:"id"`
-	File         string    `json:"file"`
-	Line         int       `json:"line"`
-	HypothesisID string    `json:"hypothesis_id"` // the suspect this probe discriminates
-	Note         string    `json:"note,omitempty"`
-	Removed      bool      `json:"removed"` // set once the probe line is deleted from code
-	CreatedAt    time.Time `json:"created_at"`
+	ID           string `json:"id"`
+	File         string `json:"file"`
+	Line         int    `json:"line"`
+	HypothesisID string `json:"hypothesis_id"` // the suspect this probe discriminates
+	// ExpectedIfTrue and ExpectedIfFalse are the optional discriminating prediction
+	// pair (harden-detective-gates D-A): how this probe's payload differs depending
+	// on whether its hypothesis is true. Both-or-neither, and non-equal when present
+	// (validated at registration). Path tracers legitimately carry neither; the
+	// confirm gate (D-C) is what requires a *confirming* probe to carry them.
+	// Additive and backward compatible: pre-change probes load with them absent.
+	ExpectedIfTrue  string    `json:"expected_if_true,omitempty"`
+	ExpectedIfFalse string    `json:"expected_if_false,omitempty"`
+	Note            string    `json:"note,omitempty"`
+	Removed         bool      `json:"removed"` // set once the probe line is deleted from code
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 // Run is a first-class repro attempt (D7). await_run opens it; the user's
@@ -107,6 +166,14 @@ type Run struct {
 	StartedAt time.Time  `json:"started_at"`
 	ClosedAt  *time.Time `json:"closed_at,omitempty"` // nil while the run is open
 	Verdict   RunVerdict `json:"verdict,omitempty"`   // set when the run closes
+	// Prediction is the fix prediction stamped on the run at await receipt — before
+	// any evidence summary is returned — describing how the evidence should change
+	// if the candidate fix is right (harden-detective-gates D-D). It is immutable
+	// once set and is the prerequisite for a fixed-check verdict, so a fixed-check
+	// contrast is judged against a recorded claim rather than conversation memory.
+	// PredictionAt records when it was stamped. Additive and backward compatible.
+	Prediction   string     `json:"prediction,omitempty"`
+	PredictionAt *time.Time `json:"prediction_at,omitempty"`
 }
 
 // LogEvent is a single ingested probe hit. Body holds the parsed JSON value when

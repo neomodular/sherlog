@@ -58,16 +58,28 @@ PATH — re-run the `brew install` above, or see
    question or two. Claude calls `debug_start`, prints the Watson banner, and
    commits at least three distinct suspects to the board.
 2. **Plant probes.** One discriminating probe per suspect — a single
-   fire-and-forget HTTP line, registered with its file, line, and the hypothesis
-   it tests. See [docs/probe-contract.md](docs/probe-contract.md).
+   fire-and-forget HTTP line, registered with its file, line, the hypothesis it
+   tests, and a recorded prediction of what its payload looks like if that
+   suspect is guilty vs. innocent. See
+   [docs/probe-contract.md](docs/probe-contract.md).
 3. **The game is afoot.** Claude asks you to reproduce the bug (rebuild/restart
    if the app is compiled or bundled) and blocks on `await_run` until probe
    activity goes quiet.
 4. **Verdict.** You report `reproduced` / `not-reproduced`; Claude reads the
-   per-probe evidence summary and kills or refines suspects from it.
-5. **Fix and verify.** Once one suspect is confirmed, Claude fixes it, runs a
-   `fixed-check` reproduction, confirms the signature changed — **"elementary."**
-6. **Case closed.** `debug_end` lists every probe not yet removed; Claude deletes
+   per-probe evidence summary and kills or refines suspects from it. Every kill
+   and confirm must cite the probe and run that prove it — the daemon
+   cross-checks the citation against its own records and **rejects uncited or
+   unsupported verdicts** with a repair instruction. Discipline is mechanical,
+   not honor-system.
+5. **Measure the blast radius.** With the culprit confirmed and before the fix,
+   Claude proposes a regex for the defect anti-pattern; the **daemon runs the
+   search itself** across your project and records every sibling hit — a pattern
+   that misses the confirmed culprit is rejected as false coverage. Claude
+   grades each hit (`sibling-bug` / `safe` / `already-covered`).
+6. **Fix and verify.** Claude records how the evidence *should* change, fixes,
+   runs a `fixed-check` reproduction, and confirms the signature changed as
+   predicted — **"elementary."**
+7. **Case closed.** `debug_end` lists every probe not yet removed; Claude deletes
    them and greps the repo for the session URL fragment, requiring zero matches
    before declaring **"case closed."**
 

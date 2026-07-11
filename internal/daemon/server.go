@@ -270,7 +270,9 @@ func (s *Server) resumeLatest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, sess)
+	// debug_resume returns the pinned commit (already on the session) and the computed
+	// repro rate alongside the existing session state (harden-detective-gates D-H, D-I).
+	writeJSON(w, http.StatusOK, withReproRate(sess))
 }
 
 // handleSessionByID dispatches /api/sessions/<id> and its sub-resources:
@@ -285,6 +287,8 @@ func (s *Server) resumeLatest(w http.ResponseWriter, r *http.Request) {
 //	POST   /api/sessions/<id>/runs/close      → record verdict on latest open run
 //	GET    /api/sessions/<id>/query           → filtered logs
 //	GET    /api/sessions/<id>/diff?a=&b=       → per-probe run comparison (browser-facing)
+//	POST   /api/sessions/<id>/blast-radius     → compile + walk + store the sibling search
+//	POST   /api/sessions/<id>/blast-radius/annotations → grade recorded sibling hits
 func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
 	if rest == "" {
@@ -315,6 +319,13 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		s.queryLogs(w, r, sessionID)
 	case sub[0] == "diff" && len(sub) == 1:
 		s.diffRuns(w, r, sessionID)
+	case sub[0] == "blast-radius" && len(sub) == 1:
+		// Run the sibling search: compile + walk + store under the false-coverage
+		// gate (add-blast-radius D-A/D-C). POST-only, enforced in the handler.
+		s.mapBlastRadius(w, r, sessionID)
+	case sub[0] == "blast-radius" && len(sub) == 2 && sub[1] == "annotations":
+		// Grade recorded hits; set-checked against the search's own facts (D-D).
+		s.annotateBlastRadius(w, r, sessionID)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -332,16 +343,27 @@ func (s *Server) sessionRoot(w http.ResponseWriter, r *http.Request, id string) 
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, sess)
+		// The computed repro rate rides the session-detail payload (harden-detective-
+		// gates D-I): derived at read time from the run verdicts, never stored. The
+		// embedded session promotes its fields (including the pinned commit) to the top
+		// level so a client decoding a bare session is unaffected.
+		writeJSON(w, http.StatusOK, withReproRate(sess))
 	case http.MethodDelete:
 		// An optional resolution body records why/how the case closed (D4). An empty
 		// body (legacy callers) closes the case unsolved; an all-empty resolution is
 		// likewise treated as unsolved by the store, so older debug_end callers keep
-		// working unchanged (mcp-server spec: backward compatible).
+		// working unchanged (mcp-server spec: backward compatible). The prevention
+		// references (harden-detective-gates D-J) are additive and recorded, never
+		// executed.
 		var req struct {
 			RootCause             string `json:"root_cause"`
 			FixSummary            string `json:"fix_summary"`
 			ConfirmedHypothesisID string `json:"confirmed_hypothesis_id"`
+			RegressionTestRef     string `json:"regression_test_ref"`
+			Guardrail             *struct {
+				Type string `json:"type"`
+				Ref  string `json:"ref"`
+			} `json:"guardrail"`
 		}
 		if !readJSON(w, r, &req) {
 			return
@@ -350,14 +372,17 @@ func (s *Server) sessionRoot(w http.ResponseWriter, r *http.Request, id string) 
 			RootCause:             req.RootCause,
 			FixSummary:            req.FixSummary,
 			ConfirmedHypothesisID: req.ConfirmedHypothesisID,
+			RegressionTestRef:     req.RegressionTestRef,
 		}
+		if req.Guardrail != nil {
+			res.Guardrail = &store.Guardrail{Type: req.Guardrail.Type, Ref: req.Guardrail.Ref}
+		}
+		// A solved-close gate rejection (partial resolution, unconfirmed hypothesis,
+		// unknown guardrail type) surfaces as a 4xx repair instruction and leaves the
+		// session OPEN — never a silent downgrade to unsolved (D-F, D-K). handleStoreErr
+		// maps the store sentinels: session-not-found → 404, gate rejections → 400.
 		unremoved, err := s.store.CloseSessionWithResolution(id, res)
-		if errors.Is(err, store.ErrSessionNotFound) {
-			writeError(w, http.StatusNotFound, err)
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
+		if s.handleStoreErr(w, err) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"unremoved_probes": unremoved})
@@ -390,13 +415,20 @@ func (s *Server) updateHypothesis(w http.ResponseWriter, r *http.Request, id, hi
 		return
 	}
 	var req struct {
-		Status string `json:"status"`
-		Note   string `json:"note"`
+		Status  string `json:"status"`
+		Note    string `json:"note"`
+		ProbeID string `json:"probe_id"`
+		RunID   string `json:"run_id"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	h, err := s.store.UpdateHypothesis(id, hid, store.HypothesisStatus(req.Status), req.Note)
+	// Kills and confirms carry an evidence citation the store cross-checks against
+	// its own registry before accepting the transition (harden-detective-gates D-B,
+	// D-C); a refine (status active) carries none and the store exempts it. Always
+	// route through the with-evidence form — an empty citation on a kill/confirm is
+	// what triggers the actionable gate error, surfaced verbatim as a 4xx below.
+	h, err := s.store.UpdateHypothesisWithEvidence(id, hid, store.HypothesisStatus(req.Status), req.Note, req.ProbeID, req.RunID)
 	if s.handleStoreErr(w, err) {
 		return
 	}
@@ -410,6 +442,21 @@ func (s *Server) registerProbe(w http.ResponseWriter, r *http.Request, id string
 	}
 	var p store.Probe
 	if !readJSON(w, r, &p) {
+		return
+	}
+	// Resolve and verify the probe location against the session cwd before storing
+	// anything (harden-detective-gates D-G): the daemon alone reliably knows the
+	// session cwd, and an unfindable probe is exactly what the cleanup gate cannot
+	// afford. Session lookup first so an unknown session is a clean 404 rather than a
+	// location error against an empty cwd.
+	sess, err := s.store.GetSession(id)
+	if s.handleStoreErr(w, err) {
+		return
+	}
+	if err := validateProbeLocation(sess, p); err != nil {
+		// A location miss is a client request error naming the resolved path (D-G),
+		// not a server fault: 400 with the message surfaced verbatim.
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	saved, err := s.store.RegisterProbe(id, p)
@@ -436,7 +483,8 @@ func (s *Server) awaitRun(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	var req struct {
-		TimeoutS int `json:"timeout_s"`
+		TimeoutS   int    `json:"timeout_s"`
+		Prediction string `json:"prediction"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -451,7 +499,10 @@ func (s *Server) awaitRun(w http.ResponseWriter, r *http.Request, id string) {
 	if timeout > s.awaiter.maxTimeout {
 		timeout = s.awaiter.maxTimeout
 	}
-	res, err := s.awaiter.await(r.Context(), id, timeout)
+	// The optional fix prediction is stamped on the run at call receipt — before any
+	// summary is returned — and is immutable once set (harden-detective-gates D-D).
+	// It is the prerequisite for a later fixed-check close.
+	res, err := s.awaiter.await(r.Context(), id, timeout, req.Prediction)
 	if s.handleStoreErr(w, err) {
 		return
 	}
@@ -531,7 +582,12 @@ func (s *Server) diffRuns(w http.ResponseWriter, r *http.Request, id string) {
 	diff, err := s.store.DiffRuns(id, a, b)
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, diff)
+		// Surface each compared run's recorded prediction so the divergence is judged
+		// against the recorded claim, not conversation memory (harden-detective-gates
+		// D-D): a fixed-check run carries a prediction, a reproduce run typically does
+		// not. The embedded diff promotes its fields, so a client decoding a bare
+		// RunDiff is unaffected — the predictions are purely additive.
+		writeJSON(w, http.StatusOK, s.diffWithPredictions(id, diff))
 	case errors.Is(err, store.ErrSessionNotFound):
 		writeError(w, http.StatusNotFound, err)
 	case errors.Is(err, store.ErrRunNotFound), errors.Is(err, store.ErrSameRun):
@@ -551,7 +607,14 @@ func (s *Server) handleCases(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.store.ListSessions())
+	// Same envelope as the detail endpoint so the list and detail views agree on
+	// repro_rate (D-I) instead of shipping raw runs on one and the rate on the other.
+	sessions := s.store.ListSessions()
+	cases := make([]sessionEnvelope, 0, len(sessions))
+	for _, sess := range sessions {
+		cases = append(cases, withReproRate(sess))
+	}
+	writeJSON(w, http.StatusOK, cases)
 }
 
 // handleStaleProbes serves the Case Board's stale-probes view: every registered
@@ -614,12 +677,41 @@ func setCORS(w http.ResponseWriter) {
 }
 
 // handleStoreErr maps store errors to HTTP status and reports whether the
-// request was already answered. Not-found errors become 404; anything else 500.
+// request was already answered. Detective-loop gate rejections become 400,
+// not-found errors 404, anything else 500. In every case the error message —
+// which for a gate carries a one-line repair instruction (harden-detective-gates
+// D-K) — is written to the body verbatim so the MCP tool can surface it unaltered.
 func (s *Server) handleStoreErr(w http.ResponseWriter, err error) bool {
 	if err == nil {
 		return false
 	}
 	switch {
+	// Gate rejections are client errors carrying a repair instruction (D-A/B/C/D/E/F/J,
+	// D-K): 400 so the agent repairs the board rather than treating it as a server
+	// fault. Kept ahead of the not-found block; these sentinels are disjoint from the
+	// not-found ones, except a citation to an unknown probe/run wraps ErrProbeNotFound
+	// / ErrRunNotFound and is intentionally reported as 404 (the cited thing is absent).
+	case errors.Is(err, store.ErrInsufficientHypotheses),
+		errors.Is(err, store.ErrPredictionPair),
+		errors.Is(err, store.ErrEvidenceCitationRequired),
+		errors.Is(err, store.ErrCitedRunNotClosed),
+		errors.Is(err, store.ErrNoReproducedRun),
+		errors.Is(err, store.ErrCitedProbeUnpredicted),
+		errors.Is(err, store.ErrFixedCheckNeedsPrediction),
+		errors.Is(err, store.ErrResolutionIncomplete),
+		errors.Is(err, store.ErrUnconfirmedHypothesis),
+		errors.Is(err, store.ErrInvalidGuardrailType),
+		errors.Is(err, store.ErrInvalidHypothesisStatus),
+		// Blast-radius gate/validation rejections (add-blast-radius D-C/D-D): a search
+		// mapped before a confirm, a pattern that misses the culprit, an annotation of a
+		// site the search never found, an invalid verdict, or an annotate before any
+		// search — all client errors carrying a repair instruction, surfaced verbatim.
+		errors.Is(err, store.ErrNoConfirmedCulprit),
+		errors.Is(err, store.ErrCulpritNotInRadius),
+		errors.Is(err, store.ErrNoBlastRadius),
+		errors.Is(err, store.ErrUnknownRadiusHit),
+		errors.Is(err, store.ErrInvalidBlastVerdict):
+		writeError(w, http.StatusBadRequest, err)
 	case errors.Is(err, store.ErrSessionNotFound),
 		errors.Is(err, store.ErrHypothesisNotFound),
 		errors.Is(err, store.ErrProbeNotFound),
@@ -629,6 +721,53 @@ func (s *Server) handleStoreErr(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusInternalServerError, err)
 	}
 	return true
+}
+
+// sessionEnvelope wraps a session with its computed repro rate for the resume and
+// session-detail payloads (harden-detective-gates D-I): the rate is derived at read
+// time from run verdicts, never stored, so it rides the response rather than the
+// persisted session. The embedded *store.Session promotes its fields (including the
+// pinned commit, D-H) to the top level, so a client decoding a bare session is
+// unaffected — repro_rate is purely additive.
+type sessionEnvelope struct {
+	*store.Session
+	ReproRate store.ReproRate `json:"repro_rate"`
+}
+
+// withReproRate builds the session-plus-repro-rate envelope from a session snapshot.
+func withReproRate(sess *store.Session) sessionEnvelope {
+	return sessionEnvelope{Session: sess, ReproRate: store.ComputeReproRate(sess.Runs)}
+}
+
+// diffEnvelope wraps a run diff with each compared run's recorded fix prediction
+// (harden-detective-gates D-D). The embedded RunDiff promotes its fields, so a client
+// decoding a bare RunDiff is unaffected; the predictions are additive and omitted
+// when the run carries none.
+type diffEnvelope struct {
+	store.RunDiff
+	PredictionA string `json:"prediction_a,omitempty"`
+	PredictionB string `json:"prediction_b,omitempty"`
+}
+
+// diffWithPredictions attaches runs A and B's recorded predictions to a diff by
+// looking them up on the session (D-D). If the session can no longer be read (it
+// vanished between the diff and this lookup — not reachable under the daemon's
+// single-process model), the bare diff is returned rather than failing the request.
+func (s *Server) diffWithPredictions(sessionID string, diff store.RunDiff) diffEnvelope {
+	env := diffEnvelope{RunDiff: diff}
+	sess, err := s.store.GetSession(sessionID)
+	if err != nil {
+		return env
+	}
+	for _, r := range sess.Runs {
+		switch r.ID {
+		case diff.RunA:
+			env.PredictionA = r.Prediction
+		case diff.RunB:
+			env.PredictionB = r.Prediction
+		}
+	}
+	return env
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -643,7 +782,11 @@ func writeError(w http.ResponseWriter, status int, err error) {
 
 // readJSON decodes a request body into v, answering 400 on malformed JSON. An
 // empty body is treated as an empty object so callers with all-optional fields
-// (e.g. await with default timeout) need not send one.
+// (e.g. await with default timeout) need not send one. Unknown fields are
+// rejected: /api/ is the internal write surface driven by the same binary's MCP
+// client, and a mistyped field silently dropped means a client believing state
+// was recorded when it was not (malformation caught at the door — the public
+// /log/ ingest stays permissive per D3 and does not use this helper).
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maxAPIBody))
 	if err != nil {
@@ -653,7 +796,9 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return true
 	}
-	if err := json.Unmarshal(raw, v); err != nil {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return false
 	}

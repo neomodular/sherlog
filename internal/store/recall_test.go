@@ -2,22 +2,32 @@ package store
 
 import "testing"
 
-// closeSolved is a test helper: create a session (with an optional title),
-// optionally set a confirmed hypothesis, then close it with the given resolution
-// so recall can match it.
+// closeSolved is a test helper: create a session (with an optional title), run the
+// full confirm ceremony on h1, then close it solved with the given resolution so
+// recall can match it. A solved close now requires a board-confirmed hypothesis and
+// all three resolution fields (harden-detective-gates D-F), so the helper fills a
+// FixSummary when the caller omits one and always confirms h1. h1's placeholder
+// statement uses tokens that deliberately do not collide with any recall query, so
+// confirming it never perturbs recall scoring; the confirmed-statement corpus
+// contribution is exercised explicitly by TestRecallMatchesConfirmedHypothesisStatement.
 func closeSolved(t *testing.T, s *Store, title, desc, cwd string, res *Resolution) string {
 	t.Helper()
 	sess, _, err := s.CreateSession(title, desc, cwd)
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if res != nil && res.ConfirmedHypothesisID != "" {
-		// Give the confirmed hypothesis a statement so searchableText can include it.
-		if _, err := s.SetHypotheses(sess.ID, []string{"the confirmed suspect statement"}); err != nil {
-			t.Fatalf("SetHypotheses: %v", err)
-		}
-		res.ConfirmedHypothesisID = "h1"
+	if _, err := s.SetHypotheses(sess.ID, []string{"placeholder confirmed suspect zzz", "second suspect", "third suspect"}); err != nil {
+		t.Fatalf("SetHypotheses: %v", err)
 	}
+	confirmH1(t, s, sess.ID)
+
+	if res == nil {
+		res = &Resolution{}
+	}
+	if res.FixSummary == "" {
+		res.FixSummary = "recorded fix"
+	}
+	res.ConfirmedHypothesisID = "h1"
 	if _, err := s.CloseSessionWithResolution(sess.ID, res); err != nil {
 		t.Fatalf("CloseSessionWithResolution: %v", err)
 	}
@@ -127,10 +137,15 @@ func TestRecallTopThreeRanked(t *testing.T) {
 func TestRecallMatchesConfirmedHypothesisStatement(t *testing.T) {
 	s := newTestStore(t)
 	sess, _, _ := s.CreateSession("", "vague symptom", "/repo")
-	s.SetHypotheses(sess.ID, []string{"connection pool exhaustion under burst load"})
-	s.UpdateHypothesis(sess.ID, "h1", HypothesisConfirmed, "confirmed by p2")
+	// h1 carries the discriminating statement; the confirm ceremony confirms it with
+	// evidence so it joins the searchable corpus (design D5) under the new gates.
+	if _, err := s.SetHypotheses(sess.ID, []string{"connection pool exhaustion under burst load", "second suspect", "third suspect"}); err != nil {
+		t.Fatalf("SetHypotheses: %v", err)
+	}
+	confirmH1(t, s, sess.ID)
 	if _, err := s.CloseSessionWithResolution(sess.ID, &Resolution{
 		RootCause:             "ran out of connections",
+		FixSummary:            "grow the pool and add backpressure",
 		ConfirmedHypothesisID: "h1",
 	}); err != nil {
 		t.Fatalf("close: %v", err)
@@ -152,6 +167,88 @@ func TestRecallEmptyQuery(t *testing.T) {
 	}
 	if m := s.Recall(""); len(m) != 0 {
 		t.Errorf("empty query should match nothing, got %+v", m)
+	}
+}
+
+// closeSolvedWithRadius is closeSolved plus a mapped blast radius: it confirms h1
+// (whose culprit probe sits at file "x", per confirmH1), records the search under
+// the false-coverage gate — so hits MUST include the culprit file "x" — then closes
+// the case solved. Used to exercise the radius-pattern recall corpus (add-blast-radius
+// D-F). The h1 placeholder statement tokens do not collide with any recall query, so
+// only the pattern and hit set under test contribute new tokens.
+func closeSolvedWithRadius(t *testing.T, s *Store, desc, cwd, pattern string, hits []BlastHit) string {
+	t.Helper()
+	sess, _, err := s.CreateSession("", desc, cwd)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.SetHypotheses(sess.ID, []string{"placeholder confirmed suspect zzz", "second suspect", "third suspect"}); err != nil {
+		t.Fatalf("SetHypotheses: %v", err)
+	}
+	confirmH1(t, s, sess.ID) // culprit probe pc at file "x"
+	if _, err := s.SetBlastRadius(sess.ID, BlastRadius{Pattern: pattern, Hits: hits}); err != nil {
+		t.Fatalf("SetBlastRadius: %v", err)
+	}
+	if _, err := s.CloseSessionWithResolution(sess.ID, &Resolution{
+		RootCause:             "recorded cause",
+		FixSummary:            "recorded fix",
+		ConfirmedHypothesisID: "h1",
+	}); err != nil {
+		t.Fatalf("CloseSessionWithResolution: %v", err)
+	}
+	return sess.ID
+}
+
+// TestRecallMatchesBlastRadiusPattern covers case-recall scenario "Recall by
+// anti-pattern": a past solved case that stored the radius pattern
+// `parseFloat\(.*price` is surfaced by a new price-parsing description, matching on
+// the pattern text alone — the old case's description and root cause share no query
+// token, so the hit can only come from the indexed pattern (add-blast-radius D-F).
+func TestRecallMatchesBlastRadiusPattern(t *testing.T) {
+	s := newTestStore(t)
+	// Description/root cause deliberately avoid "price"/"parsing": the only source of
+	// those tokens in this case's corpus is the radius pattern.
+	id := closeSolvedWithRadius(t, s, "widget renders blank on reload", "/repo",
+		`parseFloat\(.*price`,
+		[]BlastHit{
+			{File: "x", Line: 1, Excerpt: "parseFloat(row.price)"}, // culprit "x" satisfies the gate
+			{File: "src/cart.go", Line: 12, Excerpt: "parseFloat(item.price)"},
+		})
+
+	// Control twin: same description, no radius. It shares no query token, so it must
+	// score zero — proving the match below is driven by the pattern, not the prose.
+	closeSolved(t, s, "", "widget renders blank on reload", "/repo/twin", &Resolution{
+		RootCause: "stale cache handle",
+	})
+
+	matches := s.Recall("price parsing regression")
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly the radius case to match via its pattern, got %d: %+v", len(matches), matches)
+	}
+	if matches[0].SessionID != id {
+		t.Errorf("wrong case surfaced: %q want %q", matches[0].SessionID, id)
+	}
+}
+
+// TestRecallExcludesBlastRadiusHitPaths covers case-recall scenario "Hit paths not
+// matchable": a new description that merely mentions a file path recorded as a radius
+// hit produces no recall match, because hit paths are excluded from the corpus
+// (add-blast-radius D-F). Were the paths indexed, `frobnicator`/`src`/`go` would
+// match and this test would fail — that is the regression it guards.
+func TestRecallExcludesBlastRadiusHitPaths(t *testing.T) {
+	s := newTestStore(t)
+	// Corpus (description, root cause, pattern) shares no token with the query below;
+	// the query tokens live ONLY in a hit file path, which must not be indexed.
+	closeSolvedWithRadius(t, s, "widget renders blank on reload", "/repo",
+		`readToken`,
+		[]BlastHit{
+			{File: "x", Line: 1, Excerpt: "readToken()"}, // culprit "x" satisfies the gate
+			{File: "src/frobnicator.go", Line: 5, Excerpt: "readToken()"},
+		})
+
+	matches := s.Recall("why does src/frobnicator.go crash")
+	if len(matches) != 0 {
+		t.Errorf("a bare hit-path mention must not produce a recall match: %+v", matches)
 	}
 }
 

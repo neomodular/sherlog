@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -417,36 +419,53 @@ func TestCloseRunVerdict(t *testing.T) {
 // --- Internal API smoke: full mutation path through HTTP ---
 
 func TestInternalAPILifecycle(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, st := newTestServer(t)
 
-	// Create session.
-	w := do(srv, http.MethodPost, "/api/sessions", `{"description":"bug","cwd":"/tmp/x"}`)
+	// A real cwd with a real source file so the probe location check (D-G) passes.
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "app.js"), []byte("l1\nl2\nl3\nl4\nl5\nl6\n"), 0o644); err != nil {
+		t.Fatalf("write probe file: %v", err)
+	}
+
+	// Create session rooted at the real cwd.
+	body, _ := json.Marshal(map[string]string{"description": "bug", "cwd": cwd})
+	w := do(srv, http.MethodPost, "/api/sessions", string(body))
 	var created struct {
 		Session *store.Session `json:"session"`
 	}
 	decode(t, w, &created)
 	id := created.Session.ID
 
-	// Set hypotheses.
+	// Set hypotheses (≥3, D-E).
 	w = do(srv, http.MethodPut, "/api/sessions/"+id+"/hypotheses", `{"statements":["a","b","c"]}`)
 	if w.Code != 200 {
 		t.Fatalf("set hypotheses status = %d", w.Code)
 	}
-	// Update one.
-	w = do(srv, http.MethodPatch, "/api/sessions/"+id+"/hypotheses/h1", `{"status":"killed","note":"no fire"}`)
+	// Register a probe at a real in-range line (D-G location check passes).
+	w = do(srv, http.MethodPost, "/api/sessions/"+id+"/probes", `{"id":"p1","file":"app.js","line":5,"hypothesis_id":"h1"}`)
 	if w.Code != 200 {
-		t.Fatalf("update hypothesis status = %d", w.Code)
+		t.Fatalf("register probe status = %d, body = %s", w.Code, w.Body.String())
 	}
-	// Register and remove a probe.
-	w = do(srv, http.MethodPost, "/api/sessions/"+id+"/probes", `{"id":"p1","file":"a.js","line":5,"hypothesis_id":"h1"}`)
+	// A closed run so the kill can cite it (D-B).
+	run, err := st.OpenRun(id)
+	if err != nil {
+		t.Fatalf("OpenRun: %v", err)
+	}
+	if _, err := st.CloseRun(id, run.ID, store.VerdictNotReproduced); err != nil {
+		t.Fatalf("CloseRun: %v", err)
+	}
+	// Kill h1 with an evidence citation (D-B): probe p1 in the closed run.
+	patch, _ := json.Marshal(map[string]string{"status": "killed", "note": "no fire", "probe_id": "p1", "run_id": run.ID})
+	w = do(srv, http.MethodPatch, "/api/sessions/"+id+"/hypotheses/h1", string(patch))
 	if w.Code != 200 {
-		t.Fatalf("register probe status = %d", w.Code)
+		t.Fatalf("update hypothesis status = %d, body = %s", w.Code, w.Body.String())
 	}
+	// Remove the probe.
 	w = do(srv, http.MethodDelete, "/api/sessions/"+id+"/probes/p1", "")
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("remove probe status = %d", w.Code)
 	}
-	// Close session: p1 removed, so no unremoved probes.
+	// Close session unsolved (empty body): p1 removed, so no unremoved probes.
 	w = do(srv, http.MethodDelete, "/api/sessions/"+id, "")
 	var closed struct {
 		Unremoved []store.Probe `json:"unremoved_probes"`

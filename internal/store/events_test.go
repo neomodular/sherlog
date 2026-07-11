@@ -36,8 +36,10 @@ func TestSubscribeReceivesAllKinds(t *testing.T) {
 		kind EventKind
 	}
 	steps := []step{
-		{func() { s.SetHypotheses(sess.ID, []string{"a", "b"}) }, EventBoard},
-		{func() { s.UpdateHypothesis(sess.ID, "h1", HypothesisKilled, "n") }, EventBoard},
+		{func() { s.SetHypotheses(sess.ID, []string{"a", "b", "c"}) }, EventBoard},
+		// A refine (active) transition publishes a board event and needs no citation;
+		// kills/confirms are covered by the gate tests with proper evidence citations.
+		{func() { s.UpdateHypothesis(sess.ID, "h1", HypothesisActive, "n") }, EventBoard},
 		{func() { s.RegisterProbe(sess.ID, Probe{ID: "p1", File: "f", Line: 1}) }, EventProbe},
 		{func() { s.OpenRun(sess.ID) }, EventRun},
 		{func() { s.Ingest(sess.ID, "p1", nil, "x") }, EventLog},

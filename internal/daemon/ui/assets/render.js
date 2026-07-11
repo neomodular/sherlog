@@ -105,9 +105,11 @@ export function html(parts) {
 // --- hypothesis / probe display naming + color identity (polish-case-board D1/D2) ---
 
 // displayName maps a store ID to its human label: `h<N>`→"Hypothesis N",
-// `p<N>`→"Probe N" (polish-case-board D1). Any other shape (a run id like `r2`, an
-// already-clean string, "—") passes through unchanged so the helper is safe to call
-// on every reference. Stored IDs stay `h1`/`p2`; this is presentation only.
+// `p<N>`→"Probe N", `r<N>`→"Run N" (polish-case-board D1; run naming added by
+// harden-detective-gates so an evidence citation reads "Probe 1 · Run 2"). Any
+// other shape (an already-clean string, "—") passes through unchanged so the helper
+// is safe to call on every reference. Stored IDs stay `h1`/`p2`/`r3`; this is
+// presentation only.
 export function displayName(id) {
   if (id === null || id === undefined) return "";
   const s = String(id);
@@ -115,6 +117,8 @@ export function displayName(id) {
   if (m) return `Hypothesis ${m[1]}`;
   const p = s.match(/^p(\d+)$/);
   if (p) return `Probe ${p[1]}`;
+  const r = s.match(/^r(\d+)$/);
+  if (r) return `Run ${r[1]}`;
   return s;
 }
 

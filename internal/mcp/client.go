@@ -211,16 +211,27 @@ func (c *daemonClient) createSession(ctx context.Context, title, description, cw
 	return out, err
 }
 
-func (c *daemonClient) resumeLatest(ctx context.Context) (*store.Session, error) {
-	var out store.Session
+// sessionState is a session detail payload plus its computed repro rate, mirroring
+// the daemon's resume / session-detail envelope (harden-detective-gates D-I). The
+// embedded store.Session promotes its fields — including the pinned commit (D-H) — to
+// the top level, so it decodes the daemon's promoted shape and doubles as the
+// debug_resume tool output. Callers that need only the session ID read it through the
+// embedded field (sess.ID); repro_rate is additive.
+type sessionState struct {
+	store.Session
+	ReproRate store.ReproRate `json:"repro_rate"`
+}
+
+func (c *daemonClient) resumeLatest(ctx context.Context) (*sessionState, error) {
+	var out sessionState
 	if err := c.call(ctx, http.MethodGet, "/api/sessions", nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *daemonClient) getSession(ctx context.Context, id string) (*store.Session, error) {
-	var out store.Session
+func (c *daemonClient) getSession(ctx context.Context, id string) (*sessionState, error) {
+	var out sessionState
 	if err := c.call(ctx, http.MethodGet, "/api/sessions/"+id, nil, &out); err != nil {
 		return nil, err
 	}
@@ -234,29 +245,47 @@ type closeSessionResult struct {
 
 // closeSession closes a session, optionally recording its resolution (D4). A nil
 // resolution sends no body, closing the case unsolved; the daemon treats an
-// all-empty resolution as unsolved too, so existing callers stay unaffected.
+// all-empty resolution as unsolved too, so existing callers stay unaffected. The
+// prevention references (regression_test_ref, guardrail) ride the body when present
+// (harden-detective-gates D-J); the daemon records them, never executes them.
 func (c *daemonClient) closeSession(ctx context.Context, id string, res *store.Resolution) (closeSessionResult, error) {
 	var body any
 	if res != nil {
-		body = map[string]any{
+		m := map[string]any{
 			"root_cause":              res.RootCause,
 			"fix_summary":             res.FixSummary,
 			"confirmed_hypothesis_id": res.ConfirmedHypothesisID,
+			"regression_test_ref":     res.RegressionTestRef,
 		}
+		if res.Guardrail != nil {
+			m["guardrail"] = map[string]any{"type": res.Guardrail.Type, "ref": res.Guardrail.Ref}
+		}
+		body = m
 	}
 	var out closeSessionResult
 	err := c.call(ctx, http.MethodDelete, "/api/sessions/"+id, body, &out)
 	return out, err
 }
 
+// diffRunsResult is a run diff plus each compared run's recorded fix prediction,
+// mirroring the daemon's diff envelope (harden-detective-gates D-D). The embedded
+// store.RunDiff promotes its fields, so a client decoding a bare RunDiff is
+// unaffected; the predictions let the divergence be judged against the recorded claim
+// rather than conversation memory. It doubles as the diff_runs tool output.
+type diffRunsResult struct {
+	store.RunDiff
+	PredictionA string `json:"prediction_a,omitempty"`
+	PredictionB string `json:"prediction_b,omitempty"`
+}
+
 // diffRuns fetches the per-probe comparison of two runs of a session for the
-// diff_runs tool (log-query spec: Run diff). The daemon validates the run pair and
-// returns divergent probes first.
-func (c *daemonClient) diffRuns(ctx context.Context, id, runA, runB string) (store.RunDiff, error) {
+// diff_runs tool (log-query spec: Run diff). The daemon validates the run pair,
+// returns divergent probes first, and attaches each run's recorded prediction (D-D).
+func (c *daemonClient) diffRuns(ctx context.Context, id, runA, runB string) (diffRunsResult, error) {
 	q := url.Values{}
 	q.Set("a", runA)
 	q.Set("b", runB)
-	var out store.RunDiff
+	var out diffRunsResult
 	err := c.call(ctx, http.MethodGet, "/api/sessions/"+id+"/diff?"+q.Encode(), nil, &out)
 	return out, err
 }
@@ -268,10 +297,14 @@ func (c *daemonClient) setHypotheses(ctx context.Context, id string, statements 
 	return out, err
 }
 
-func (c *daemonClient) updateHypothesis(ctx context.Context, id, hid, status, note string) (store.Hypothesis, error) {
+// updateHypothesis routes a status change to the daemon, carrying the evidence
+// citation (probe_id, run_id) that a kill or confirm requires (harden-detective-gates
+// D-B). The daemon cross-checks the citation against its own registry; a refine
+// (status active) sends empty citation fields the daemon exempts.
+func (c *daemonClient) updateHypothesis(ctx context.Context, id, hid, status, note, probeID, runID string) (store.Hypothesis, error) {
 	var out store.Hypothesis
 	err := c.call(ctx, http.MethodPatch, "/api/sessions/"+id+"/hypotheses/"+hid,
-		map[string]any{"status": status, "note": note}, &out)
+		map[string]any{"status": status, "note": note, "probe_id": probeID, "run_id": runID}, &out)
 	return out, err
 }
 
@@ -285,20 +318,25 @@ func (c *daemonClient) removeProbe(ctx context.Context, id, pid string) error {
 	return c.call(ctx, http.MethodDelete, "/api/sessions/"+id+"/probes/"+pid, nil, nil)
 }
 
-// awaitRunResult mirrors the daemon's await response (await.go awaitResult).
+// awaitRunResult mirrors the daemon's await response (await.go awaitResult),
+// including the session's computed repro rate with raw counts (harden-detective-gates
+// D-I) so the result surfaces a computed — not asserted — determinism signal.
 type awaitRunResult struct {
 	Run       store.Run            `json:"run"`
 	Summary   []store.ProbeSummary `json:"summary"`
 	Reason    string               `json:"reason"`
 	TotalSeen int                  `json:"total_seen"`
+	ReproRate store.ReproRate      `json:"repro_rate"`
 }
 
 // awaitRun long-polls /await using the no-timeout client; the daemon honors the
-// requested timeout and the surrounding context bounds the wait (D8).
-func (c *daemonClient) awaitRun(ctx context.Context, id string, timeoutS int) (awaitRunResult, error) {
+// requested timeout and the surrounding context bounds the wait (D8). The optional
+// fix prediction is forwarded so the daemon stamps it on the run at call receipt —
+// before any summary is returned — as the prerequisite for a fixed-check close (D-D).
+func (c *daemonClient) awaitRun(ctx context.Context, id string, timeoutS int, prediction string) (awaitRunResult, error) {
 	var out awaitRunResult
 	err := c.callWith(ctx, c.awaitHTTP, http.MethodPost, "/api/sessions/"+id+"/await",
-		map[string]any{"timeout_s": timeoutS}, &out)
+		map[string]any{"timeout_s": timeoutS, "prediction": prediction}, &out)
 	return out, err
 }
 
@@ -326,6 +364,50 @@ func (c *daemonClient) queryLogs(ctx context.Context, id string, f store.QueryFi
 	}
 	var out []store.QueryResult
 	err := c.call(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
+
+// blastRadiusResult mirrors the daemon's blast-radius envelope (add-blast-radius,
+// mcp-server spec): the recorded radius (pattern, note, searched_at, truncated, hits)
+// plus its derived unreviewed count. The embedded store.BlastRadius promotes its
+// fields — pattern/hits/truncated decode directly on the wire — so a client decoding a
+// bare radius is unaffected; unreviewed_count is additive and doubles as the
+// map_blast_radius / annotate_blast_radius tool output.
+type blastRadiusResult struct {
+	store.BlastRadius
+	UnreviewedCount int `json:"unreviewed_count"`
+}
+
+// blastAnnotationBody is one per-hit verdict on the annotate wire (add-blast-radius
+// D-D). The JSON field names match the daemon's strict decoder exactly — unknown
+// fields are 400s — so file/line/verdict/note are named verbatim.
+type blastAnnotationBody struct {
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+	Verdict string `json:"verdict"`
+	Note    string `json:"note,omitempty"`
+}
+
+// mapBlastRadius passes the agent-authored pattern to the daemon for execution and
+// decodes the recorded radius (add-blast-radius D-A). The daemon compiles the pattern,
+// walks the session cwd, and enforces the false-coverage gate; a compile error, an
+// empty pattern, or a gate rejection comes back as a non-2xx whose message callWith
+// surfaces verbatim for the tool to relay.
+func (c *daemonClient) mapBlastRadius(ctx context.Context, id, pattern, note string) (blastRadiusResult, error) {
+	var out blastRadiusResult
+	err := c.call(ctx, http.MethodPost, "/api/sessions/"+id+"/blast-radius",
+		map[string]any{"pattern": pattern, "note": note}, &out)
+	return out, err
+}
+
+// annotateBlastRadius merges the agent's per-hit verdicts into the recorded radius via
+// the daemon (add-blast-radius D-D). The daemon set-checks each {file, line} against
+// the recorded hits and re-validates the verdict enum; a rejection (unknown site,
+// invalid verdict, no radius) surfaces verbatim.
+func (c *daemonClient) annotateBlastRadius(ctx context.Context, id string, anns []blastAnnotationBody) (blastRadiusResult, error) {
+	var out blastRadiusResult
+	err := c.call(ctx, http.MethodPost, "/api/sessions/"+id+"/blast-radius/annotations",
+		map[string]any{"annotations": anns}, &out)
 	return out, err
 }
 

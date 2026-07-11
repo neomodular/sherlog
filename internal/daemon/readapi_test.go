@@ -9,10 +9,20 @@ import (
 
 // seedRun opens a run on the session, ingests one hit for each given probe through
 // the public endpoint (so the latest-open-run attribution path is exercised), then
-// closes the run with the verdict. Returns the run ID.
+// closes the run with the verdict. Returns the run ID. A fixed-check verdict requires
+// a fix prediction stamped before the evidence returned (harden-detective-gates D-D),
+// so the run is opened with one when that verdict is requested.
 func seedRun(t *testing.T, srv *Server, st *store.Store, sessionID string, verdict store.RunVerdict, probes ...string) string {
 	t.Helper()
-	run, err := st.OpenRun(sessionID)
+	var (
+		run store.Run
+		err error
+	)
+	if verdict == store.VerdictFixedCheck {
+		run, err = st.OpenOrAttachRunWithPrediction(sessionID, "fix holds: the divergent probe stops firing")
+	} else {
+		run, err = st.OpenRun(sessionID)
+	}
 	if err != nil {
 		t.Fatalf("OpenRun: %v", err)
 	}
@@ -38,11 +48,27 @@ func TestDiffEndpoint(t *testing.T) {
 	runB := seedRun(t, srv, st, sess.ID, store.VerdictFixedCheck, "p1", "p3") // p1 + p3
 
 	w := do(srv, http.MethodGet, "/api/sessions/"+sess.ID+"/diff?a="+runA+"&b="+runB, "")
-	var diff store.RunDiff
+	// The diff payload embeds the RunDiff and adds each compared run's recorded
+	// prediction (harden-detective-gates D-D); the embedded fields promote so the
+	// existing RunDiff assertions still read directly off the struct.
+	var diff struct {
+		store.RunDiff
+		PredictionA string `json:"prediction_a"`
+		PredictionB string `json:"prediction_b"`
+	}
 	decode(t, w, &diff)
 
 	if diff.RunA != runA || diff.RunB != runB {
 		t.Errorf("diff runs = %s/%s, want %s/%s", diff.RunA, diff.RunB, runA, runB)
+	}
+	// Run B is the fixed-check run, opened with a prediction: it must surface with the
+	// diff so the contrast is judged against the recorded claim (D-D). Run A is a plain
+	// reproduce run and carries none.
+	if diff.PredictionB == "" {
+		t.Error("diff should surface the fixed-check run's prediction, got empty")
+	}
+	if diff.PredictionA != "" {
+		t.Errorf("reproduce run A should carry no prediction, got %q", diff.PredictionA)
 	}
 	byProbe := map[string]store.ProbeDiff{}
 	for _, pd := range diff.Probes {
@@ -90,16 +116,42 @@ func TestDiffEndpointInvalidPairs(t *testing.T) {
 	}
 }
 
+// seedConfirmedSession builds a session whose hypothesis h1 is board-confirmed via a
+// real citation: a ≥3 board, a predicted probe, a reproduced run, and a with-evidence
+// confirm — the full set of gates a solved close depends on (harden-detective-gates
+// D-C, D-F). Returns the session and the confirmed hypothesis id. Store-level probe
+// registration is used so a placeholder file path is fine (the daemon's location
+// check, D-G, guards only the HTTP registration path).
+func seedConfirmedSession(t *testing.T, srv *Server, st *store.Store) (*store.Session, string) {
+	t.Helper()
+	sess := mustSession(t, st)
+	if _, err := st.SetHypotheses(sess.ID, []string{"h1 cause", "h2 cause", "h3 cause"}); err != nil {
+		t.Fatalf("SetHypotheses: %v", err)
+	}
+	if _, err := st.RegisterProbe(sess.ID, store.Probe{
+		ID: "p1", File: "a.js", Line: 1, HypothesisID: "h1",
+		ExpectedIfTrue: "token=null past TTL", ExpectedIfFalse: "token fresh",
+	}); err != nil {
+		t.Fatalf("RegisterProbe: %v", err)
+	}
+	run := seedRun(t, srv, st, sess.ID, store.VerdictReproduced, "p1")
+	if _, err := st.UpdateHypothesisWithEvidence(sess.ID, "h1", store.HypothesisConfirmed, "confirmed by p1", "p1", run); err != nil {
+		t.Fatalf("confirm h1: %v", err)
+	}
+	return sess, "h1"
+}
+
 // TestCasesEndpoint covers GET /api/cases (case-board-ui spec: case list): all
 // sessions are returned, open before closed, and a closed-solved case carries its
 // resolution.
 func TestCasesEndpoint(t *testing.T) {
 	srv, st := newTestServer(t)
 	open := mustSession(t, st)
-	solved := mustSession(t, st)
+	solved, confirmedID := seedConfirmedSession(t, srv, st)
 	if _, err := st.CloseSessionWithResolution(solved.ID, &store.Resolution{
-		RootCause:  "float rounding in discount calc",
-		FixSummary: "round once at the boundary",
+		RootCause:             "float rounding in discount calc",
+		FixSummary:            "round once at the boundary",
+		ConfirmedHypothesisID: confirmedID,
 	}); err != nil {
 		t.Fatalf("close with resolution: %v", err)
 	}

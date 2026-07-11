@@ -178,6 +178,89 @@ func TestCaseBoardPolish(t *testing.T) {
 	}
 }
 
+// TestCaseBoardHardenGates guards the harden-detective-gates UI wiring against
+// regression (case-board-ui delta: probe predictions, hypothesis evidence citations,
+// repro rate + pinned commit in the header, fixed-check run predictions, and the
+// resolution prevention references). These are string checks against the embedded
+// assets — the read-only, embedded, and zero-external-origin guarantees are covered
+// by the tests above and continue to apply to every rendering added here.
+func TestCaseBoardHardenGates(t *testing.T) {
+	srv, _ := newTestServer(t)
+	checks := []struct {
+		path string
+		want []string
+	}{
+		// displayName gains the run mapping so a citation reads "Probe 1 · Run 2" (D-B).
+		{"/render.js", []string{"Run ${r[1]}"}},
+		// Detail view: the probe prediction pair (labeled if-true / if-false), the
+		// hypothesis evidence citation, the run's recorded fix prediction, and the
+		// resolution prevention references (regression test + guardrail).
+		{"/detail.js", []string{
+			"expected_if_true", "expected_if_false", "predictionPair", "if true", "if false",
+			"evidence_probe_id", "evidence_run_id", "citation",
+			"run-prediction", "r.prediction",
+			"regression_test_ref", "guardrail", "guardrailValue",
+		}},
+		// Compare view: each compared run's recorded prediction rendered above the
+		// divergence list, plus the case header's repro rate + short commit (the
+		// shared caseHeader lives in diff.js).
+		{"/diff.js", []string{
+			"prediction_a", "prediction_b", "predictionBlock",
+			"repro_rate", "reproduced", "commit", "shortCommit",
+		}},
+	}
+	for _, c := range checks {
+		w := do(srv, http.MethodGet, c.path, "")
+		body := readBody(t, w)
+		for _, want := range c.want {
+			if !strings.Contains(body, want) {
+				t.Errorf("asset %s missing %q (harden-detective-gates wiring regressed)", c.path, want)
+			}
+		}
+	}
+}
+
+// TestCaseBoardBlastRadius guards the add-blast-radius UI wiring (case-board-ui
+// delta: the case detail + closed-case view render the radius — pattern, each hit
+// as file:line + excerpt with a verdict badge, unreviewed count, truncation notice;
+// inert text only, section omitted when there is no radius). These are string checks
+// against the embedded assets; the read-only, embedded, and zero-external-origin
+// guarantees are enforced by the tests above and continue to apply to this section.
+func TestCaseBoardBlastRadius(t *testing.T) {
+	srv, _ := newTestServer(t)
+	checks := []struct {
+		path string
+		want []string
+	}{
+		// Detail view: the radius section reads the session's blast_radius field and
+		// renders the pattern, each hit's file/line/excerpt (via loc — an inert span,
+		// never an anchor), the verdict badge, the unreviewed count, and the truncation
+		// notice. The section is derived from blast_radius so a missing field omits it.
+		{"/detail.js", []string{
+			"blast_radius", "radiusSection", "radiusHitRow", "radiusVerdict",
+			"radius-pattern", "excerpt", "unreviewed", "truncated",
+			// Long hit lists collapse: graded hits sort into the preview and the tail
+			// folds behind a native <details> expander labeled with the hidden count.
+			"RADIUS_PREVIEW", "radius-more", "<details", "more hit",
+		}},
+		// The stylesheet carries a distinct badge for every hit verdict plus the
+		// section styles (so a dropped palette entry or renamed class fails CI).
+		{"/board.css", []string{
+			".badge.sibling-bug", ".badge.safe", ".badge.already-covered",
+			".badge.unreviewed", ".radius", ".radius-pattern", ".radius-more",
+		}},
+	}
+	for _, c := range checks {
+		w := do(srv, http.MethodGet, c.path, "")
+		body := readBody(t, w)
+		for _, want := range c.want {
+			if !strings.Contains(body, want) {
+				t.Errorf("asset %s missing %q (blast-radius wiring regressed)", c.path, want)
+			}
+		}
+	}
+}
+
 // readBody drains a recorder's body to a string for content assertions.
 func readBody(t *testing.T, w *httptest.ResponseRecorder) string {
 	t.Helper()
