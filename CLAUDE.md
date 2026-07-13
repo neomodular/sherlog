@@ -45,8 +45,13 @@ sherlog config list|get <key>|set <key> <value>
 ```
 
 Testing the plugin against a working copy: `go install ./cmd/sherlog`, ensure that
-binary is first on PATH, then **kill any running `sherlog` daemon process** so the
-new binary auto-respawns on the next MCP call.
+binary is first on PATH — that's it. The resident daemon watches its own
+executable and, within one watch interval (~30s), notices `go install` replaced
+it, drains any in-flight `await_run`, and exits on its own; the next MCP call
+auto-respawns the new binary. No manual `pkill` needed. (Pre-`restart-on-upgrade`
+this was a manual dance — "kill any running `sherlog` daemon so the new binary
+auto-respawns"; a daemon still running from before that change needs one last kill,
+then never again.) See the daemon-lifecycle section in `docs/architecture.md`.
 
 ## Architecture
 

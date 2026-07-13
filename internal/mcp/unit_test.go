@@ -2,9 +2,11 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -91,11 +93,84 @@ func TestEnsureDaemonHealthy(t *testing.T) {
 	c := &daemonClient{
 		base:      healthy.URL,
 		port:      port,
+		version:   "test", // matches the daemon's reported version → no mismatch note
 		http:      &http.Client{Timeout: time.Second},
 		awaitHTTP: &http.Client{},
 	}
 	if err := c.ensureDaemon(context.Background()); err != nil {
 		t.Fatalf("ensureDaemon against healthy daemon: %v", err)
+	}
+}
+
+// TestEnsureDaemonVersionDisclosure covers the stale-client disclosure (D-E):
+// a version delta between the daemon's /health and this process's compiled
+// version emits exactly one informational line per process (sync.Once) across many
+// tool calls, matching versions stay silent, and neither path changes behavior —
+// ensureDaemon still returns nil every time.
+func TestEnsureDaemonVersionDisclosure(t *testing.T) {
+	tests := []struct {
+		name          string
+		clientVersion string
+		daemonVersion string
+		calls         int
+		wantLines     int
+	}{
+		{name: "stale client notes mismatch once", clientVersion: "v0.8.0", daemonVersion: "v0.9.0", calls: 5, wantLines: 1},
+		{name: "matching versions stay silent", clientVersion: "v0.9.0", daemonVersion: "v0.9.0", calls: 5, wantLines: 0},
+		{name: "dev vs dev is not a mismatch", clientVersion: "dev", daemonVersion: "dev", calls: 3, wantLines: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			daemonVersion := tt.daemonVersion
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/health" {
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"version":%q,"uptime":"1s"}`, daemonVersion)
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer srv.Close()
+
+			addr := strings.TrimPrefix(srv.URL, "http://")
+			_, port, _ := strings.Cut(addr, ":")
+
+			var mu sync.Mutex
+			var lines []string
+			c := &daemonClient{
+				base:      srv.URL,
+				port:      port,
+				version:   tt.clientVersion,
+				http:      &http.Client{Timeout: time.Second},
+				awaitHTTP: &http.Client{},
+				logf: func(format string, args ...any) {
+					mu.Lock()
+					defer mu.Unlock()
+					lines = append(lines, fmt.Sprintf(format, args...))
+				},
+			}
+
+			for i := 0; i < tt.calls; i++ {
+				if err := c.ensureDaemon(context.Background()); err != nil {
+					t.Fatalf("ensureDaemon call %d: %v", i, err) // no behavior change: always nil
+				}
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(lines) != tt.wantLines {
+				t.Fatalf("emitted %d disclosure line(s), want %d: %v", len(lines), tt.wantLines, lines)
+			}
+			if tt.wantLines == 1 {
+				got := lines[0]
+				if !strings.Contains(got, tt.daemonVersion) || !strings.Contains(got, tt.clientVersion) {
+					t.Errorf("disclosure line should name both versions, got: %q", got)
+				}
+				if !strings.Contains(strings.ToLower(got), "restart") {
+					t.Errorf("disclosure line should mention a session restart, got: %q", got)
+				}
+			}
+		})
 	}
 }
 

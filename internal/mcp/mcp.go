@@ -20,7 +20,7 @@ func Run(ctx context.Context, version string) error {
 		Version: version,
 	}, nil)
 
-	c := newDaemonClient()
+	c := newDaemonClient(version)
 	registerTools(server, c)
 
 	// Best-effort startup warm-up: the spec requires a daemon health check "on

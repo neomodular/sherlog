@@ -5,10 +5,13 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
+	"os"
 	"syscall"
 	"time"
 
@@ -20,6 +23,13 @@ import (
 // lines instantly recognizable in diffs. It mirrors config.DefaultPort so other
 // packages (the MCP client) can reference the brand port without importing config.
 const DefaultPort = config.DefaultPort
+
+// shutdownGrace bounds the graceful HTTP shutdown after a drained exit
+// (restart-on-upgrade D-D). The drain already waited for awaits to finish (gauge
+// zero) except in the bounded-fallback case; this only caps how long the normal
+// shutdown path waits for any lingering handler before the process exits and the
+// next tool call respawns the new binary.
+const shutdownGrace = 5 * time.Second
 
 // Run starts the daemon and blocks until the HTTP server exits. Configuration is
 // resolved once (env > file > default, add-config) and drives the port, the store
@@ -46,13 +56,20 @@ func Run(version string) error {
 	// Retention pruning). retention_days 0 (the default) keeps everything forever.
 	startRetention(st, cfg.RetentionDays)
 
+	handler := NewServer(st, version, cfg)
+
+	// Capture the executable's identity BEFORE the listener opens (D-B) so a binary
+	// replaced during startup is still caught on the first tick. A failure to resolve
+	// or stat the executable disables the watcher for this process — never fatal; the
+	// daemon simply keeps the pre-watcher behavior (manual kill), logged once (D-B).
+	watcher := newBinaryWatcher(handler)
+
 	addr := net.JoinHostPort("127.0.0.1", cfg.Port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return bindError(addr, cfg.Port, err)
 	}
 
-	handler := NewServer(st, version, cfg)
 	// Confirm the loopback_only self-check against the real bound host rather than
 	// the default (add-health-page D3). JoinHostPort above always uses 127.0.0.1, so
 	// this is belt-and-suspenders, but it keeps the check honest if the bind changes.
@@ -60,6 +77,46 @@ func Run(version string) error {
 		handler.SetBindHost(host)
 	}
 
+	if err := serve(handler, ln, watcher); err != nil {
+		return fmt.Errorf("daemon: serve on %s: %w", addr, err)
+	}
+	return nil
+}
+
+// newBinaryWatcher builds the self-restart watcher for the daemon's own executable
+// (restart-on-upgrade D-B), or returns nil when the executable cannot be resolved
+// or stat'd at startup — in which case the watcher is disabled for this process and
+// the pre-watcher behavior (a manual kill remains the only way to retire the
+// daemon) stays in effect. Either failure is logged once, never fatal. The
+// baseline identity is captured here, before the listener opens, so a binary
+// replaced mid-startup is caught on the first tick.
+func newBinaryWatcher(handler *Server) *binWatcher {
+	exe, err := os.Executable()
+	if err != nil {
+		log.Printf("sherlog: binary watch disabled (cannot resolve executable path): %v", err)
+		return nil
+	}
+	baseline, err := captureBinIdentity(exe)
+	if err != nil {
+		log.Printf("sherlog: binary watch disabled (cannot stat executable %q): %v", exe, err)
+		return nil
+	}
+	return &binWatcher{
+		path:     exe,
+		interval: binaryWatchInterval,
+		baseline: baseline,
+		maxDrain: handler.awaiter.maxTimeout,
+		inFlight: func() int64 { return handler.awaiter.inFlight.Load() },
+	}
+}
+
+// serve runs the HTTP server and, when a watcher is present, the binary watcher
+// alongside it (restart-on-upgrade D-D). It returns nil when the watcher drains the
+// daemon toward a clean exit (so Run exits 0 and the next tool call respawns the
+// binary now on disk), or the server's own error when it stops for any other reason.
+// A nil watcher means the watcher was disabled at startup: the daemon just serves
+// until the server stops on its own, exactly as before this change.
+func serve(handler *Server, ln net.Listener, watcher *binWatcher) error {
 	srv := &http.Server{
 		Handler: handler,
 		// Generous header timeout guards against slowloris on a localhost-only
@@ -67,10 +124,44 @@ func Run(version string) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("daemon: serve on %s: %w", addr, err)
+	serveErr := make(chan error, 1)
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+			return
+		}
+		serveErr <- nil
+	}()
+
+	if watcher == nil {
+		return <-serveErr
 	}
-	return nil
+
+	stopWatch := make(chan struct{})
+	drained := make(chan struct{}, 1)
+	go func() {
+		if watcher.run(stopWatch) {
+			drained <- struct{}{}
+		}
+	}()
+
+	select {
+	case err := <-serveErr:
+		// The server stopped on its own (a fatal serve error). Tear the watcher down
+		// and report the error.
+		close(stopWatch)
+		return err
+	case <-drained:
+		// The watcher observed a replaced binary and drained: shut the server down
+		// through the graceful path (D-D). Awaits have already returned (gauge zero)
+		// in the normal case; the bounded fallback caps how long a wedged await can
+		// hold shutdown. Serve returns ErrServerClosed once the listener closes, so
+		// the goroutine reports nil below.
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+		return <-serveErr
+	}
 }
 
 // bindError turns a listen failure into an actionable message. "Address already

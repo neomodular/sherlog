@@ -27,7 +27,7 @@ gofmt -l .        # must print nothing
 go install ./cmd/sherlog
 ```
 
-To test the plugin against your working copy: `/plugin marketplace add <path-to-your-clone>` in Claude Code, install the `sherlog` plugin, and ensure your freshly built binary is first on PATH. Kill any running daemon (`sherlog` process) after rebuilding so the new binary auto-respawns.
+To test the plugin against your working copy: `/plugin marketplace add <path-to-your-clone>` in Claude Code, install the `sherlog` plugin, and ensure your freshly built binary is first on PATH. `go install` alone is enough — the resident daemon watches its own executable and, within one watch interval (~30s), sees the replaced binary, drains any in-flight `await_run`, and exits; the next MCP call respawns the new build. (If a daemon is still running from before the self-restart watcher landed, kill it once — `sherlog` process — then never again.)
 
 ## Project Structure
 

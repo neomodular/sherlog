@@ -94,6 +94,47 @@ Two fixes:
   > Stop the running daemon (or let the next tool call re-spawn it) after changing
   > the port.
 
+## I upgraded sherlog but it's still running the old behavior
+
+**In almost every case: nothing to do — just wait ~30s.** The resident daemon
+watches its own executable. When `brew upgrade` or `go install` replaces the binary
+on disk, the running daemon notices within one watch interval (a fixed **30s**),
+drains any in-flight `await_run`, and exits on its own; the next tool call
+auto-spawns the new version. The swap loses nothing — open runs replay as open and
+`await_run` re-attaches — so an investigation in progress simply continues on the
+new binary. A Case Board tab reconnects on its own.
+
+1. **Upgrade, then keep working.** `brew upgrade neomodular/tap/sherlog` (or
+   `go install ./cmd/sherlog` from a clone) is the whole operation. Within ~30s the
+   old daemon retires itself; you'll see a line like `daemon executable changed …;
+   draining before restart` in its stderr log if you're watching it. No manual
+   `pkill` — the manual "kill the resident daemon" step from earlier releases is
+   gone.
+
+2. **If a *blocking* `await_run` is in flight, the swap waits for it.** The daemon
+   drains rather than yanking the wait out from under a reproduction, so the retire
+   can lag up to `await_max_timeout_seconds` (default 600s) if a wait is wedged.
+   Finish or let the current reproduction time out and the swap completes on the
+   next tick.
+
+3. **One-time exception: a daemon predating the watcher.** The *first* upgrade to a
+   version that carries the self-restart watcher can't retire the daemon that's
+   already running, because that old process has no watcher. Kill it once:
+
+   ```sh
+   pkill -f 'sherlog daemon'
+   ```
+
+   The next tool call respawns the new binary, and every upgrade after that is
+   hands-off. This is the only time you should need to kill the daemon by hand.
+
+4. **The MCP side needs a session restart, separately.** Upgrading swaps the
+   *daemon*; the tool schemas your current Claude session loaded came from the old
+   `sherlog mcp` process, which Claude Code owns. If the new version changed tools,
+   the client logs one line noting its version differs from the daemon's and asking
+   you to restart the session — restarting Claude Code reloads the new schemas. This
+   is disclosure only; the daemon keeps serving normally in the meantime.
+
 ## Leftover (stale) probes — finding and removing them
 
 A probe registered but never marked removed is *stale*. Even when the session is

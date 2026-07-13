@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/neomodular/sherlog/internal/store"
@@ -30,6 +31,14 @@ type awaitEngine struct {
 	debounce   time.Duration
 	poll       time.Duration
 	maxTimeout time.Duration
+
+	// inFlight counts the blocking awaits currently in flight — the drain gauge the
+	// binary watcher reads to decide when a swap is safe (restart-on-upgrade D-C,
+	// following the Server.subscribers atomic-gauge precedent). It is incremented for
+	// the full life of each await call and decremented on return, so a reading of
+	// zero means no reproduction wait is mid-flight and the daemon can exit without
+	// erroring an active await.
+	inFlight atomic.Int64
 }
 
 // newAwaitEngine builds the engine with the configured debounce and max-timeout
@@ -64,6 +73,13 @@ type awaitResult struct {
 // adopted nor live — it returns at timeout reporting zero events so the skill can
 // run a connectivity check.
 func (e *awaitEngine) await(ctx context.Context, sessionID string, timeout time.Duration, prediction string) (awaitResult, error) {
+	// Mark this await in flight for the drain gauge (D-C): the binary watcher exits
+	// only on a tick where this reads zero, so the increment must bracket the entire
+	// blocking wait — including the open-or-attach and the final summary assembly —
+	// and the decrement must run on every return path.
+	e.inFlight.Add(1)
+	defer e.inFlight.Add(-1)
+
 	// Atomically open a run or re-attach to the session's already-open one, so
 	// re-invocation while a run is open is idempotent and concurrent awaits
 	// converge on the same run (D8). The optional fix prediction is stamped here, at

@@ -295,3 +295,78 @@ disagree on where to talk. Probe URL templates carry the resolved port, so a por
 override propagates into every emitted probe line. See
 [configuration.md](configuration.md) for precedence details and
 [troubleshooting.md](troubleshooting.md) for port conflicts.
+
+## Daemon lifecycle: self-restart on upgrade
+
+The daemon is a resident process, so an upgrade (`brew upgrade`, `go install`)
+replaces the binary on disk while the *old* process keeps serving. Sherlog closes
+that gap itself: the running daemon watches its own executable and steps aside when
+a new version lands. The respawn half already existed — the MCP client auto-spawns
+`sherlog daemon` (resolved at spawn time) whenever the port is silent — so the only
+missing piece was the yield.
+
+**Watching the binary.** At startup the daemon records the identity of
+`os.Executable()` — device+inode where the platform stat view provides them
+(Linux, macOS, the BSDs), plus mtime and size as a portable fallback — and re-stats
+it on a fixed **30s** ticker (following the retention-pruning ticker; deliberately
+not configurable). The baseline is captured **before** the listener opens, so a
+binary replaced during startup is still caught on the first tick. A **vanished
+file** (brew cleanup deleting the old Cellar path) or a **changed identity**
+(rename-over — the atomic install pattern of both brew and `go install`) means a new
+version landed. If `os.Executable()` can't be resolved or stat'd at startup, the
+watcher is disabled for that process with a single log line — never fatal; the
+daemon simply keeps the pre-watcher behavior (a manual kill remains the only way to
+retire it). A transient stat error on a later tick is logged and skipped, never
+mistaken for a replacement.
+
+**Why file identity, not version comparison.** The disk is the single source of
+truth; version strings are never compared to decide a restart. The tempting
+alternative — have the MCP client compare its own version to the daemon's `/health`
+version and restart on mismatch — is wrong: a *stale* MCP process (spawned before
+the upgrade, still alive in an open Claude session) would **downgrade** a newer
+daemon, and two sessions on different binaries would **thrash** the daemon in a
+restart loop. `"dev"` versus `"dev"` is also unorderable exactly where the pain is
+worst (development). File identity works identically for releases and dev builds,
+and the observer holding a stale copy never gets a vote. A spurious trigger — a
+`touch` or re-sign that changes mtime/size without a real upgrade — is harmless by
+design: state survives, the next call respawns off the same disk state, costing one
+auto-respawn.
+
+**Drain before exit.** Exit is safe at *any* instant — the store persists
+synchronously (atomic `state.json`, append-only `logs.jsonl` replayed on start), so
+nothing is lost by exiting. The drain exists only to avoid yanking a **blocking
+`await_run`** out from under a user mid-reproduction. The await engine carries an
+in-flight gauge (`atomic.Int64`, following the SSE `subscribers` precedent),
+incremented for the full life of each blocking await. On the tick a replacement is
+observed, the daemon marks itself draining, logs one stderr line naming the old and
+observed identity (visible in `nohup`/launchd logs), and exits on the first tick the
+gauge reads **zero**. Awaits that arrive *while draining* are still served —
+rejecting them would break an active investigation for an invisible reason. Bounded
+fallback: if the drain outlasts `await_max_timeout_seconds` (default 600s — the
+longest any single await can block), the daemon exits regardless, so a wedged await
+can never pin a stale binary forever.
+
+**The handoff.** The exit is a clean return through the normal shutdown path (exit
+code 0, graceful HTTP shutdown) — never an `os.Exit` mid-handler. The next MCP tool
+call finds the port silent and auto-spawns the binary now on disk (the new version).
+Open runs replay as **open** on restart and `await_run` **re-attaches**, so an
+investigation continues off replayed state with no user action beyond the upgrade
+itself. Case Board browsers reconnect on their own: `EventSource` auto-retries and
+the case list re-fetches. The interrupted-await worst case (the bounded fallback
+fired while a wait was blocking) is recoverable by design — the run replays open and
+the next `await_run` call re-attaches to it.
+
+**Stale-MCP disclosure, not enforcement.** The MCP process can't restart itself —
+Claude Code owns that lifecycle — so the swap only re-versions the *daemon*, not the
+tool schemas the running session loaded. That half sherlog can only **disclose**:
+after a successful health check, the MCP client compares the daemon's `/health`
+version to its own compiled version and, on mismatch, writes a single informational
+stderr line (once per process) — the daemon is current, this session is not, and
+only a Claude session restart loads the new tool schemas. No restart, kill, or
+refusal follows from the comparison; every tool call proceeds normally. It is the
+honest boundary of what sherlog can fix from inside a running session.
+
+The first upgrade to a version carrying the watcher still needs one last manual
+daemon kill, because the resident daemon predates the watcher — thereafter the
+manual step is gone. See [troubleshooting.md](troubleshooting.md) for the operator
+view of the upgrade flow.

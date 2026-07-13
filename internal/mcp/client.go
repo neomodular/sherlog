@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/neomodular/sherlog/internal/config"
@@ -30,6 +32,17 @@ type daemonClient struct {
 	// awaitHTTP has no overall timeout: await_run long-polls for up to its
 	// requested duration, so a fixed client timeout would cut the wait short.
 	awaitHTTP *http.Client
+
+	// version is this MCP process's compiled version (main.version via mcp.Run),
+	// compared against the daemon's /health version to disclose — never enforce —
+	// a stale-client mismatch (restart-on-upgrade D-E).
+	version string
+	// versionMismatchOnce guards the disclosure so exactly one informational line
+	// is emitted per process no matter how many tool calls hit ensureDaemon (D-E).
+	versionMismatchOnce sync.Once
+	// logf routes informational lines; nil in production so logline falls back to
+	// log.Printf (stderr). Tests inject a capture to avoid touching real stderr.
+	logf func(format string, args ...any)
 }
 
 // healthInfo is the daemon's /health payload; the version field is how the MCP
@@ -45,8 +58,9 @@ type healthInfo struct {
 // disagree on the port even when it is set via config.json rather than
 // SHERLOG_PORT (design D2/D4). A config load failure falls back to the brand port
 // rather than blocking the MCP server from starting. It does not contact the
-// daemon.
-func newDaemonClient() *daemonClient {
+// daemon. version is this process's compiled version, carried so ensureDaemon can
+// disclose a stale-client mismatch against the daemon's /health version (D-E).
+func newDaemonClient(version string) *daemonClient {
 	port := daemon.DefaultPort
 	if root, err := config.DefaultRoot(); err == nil {
 		if cfg, err := config.Load(root); err == nil {
@@ -56,6 +70,7 @@ func newDaemonClient() *daemonClient {
 	return &daemonClient{
 		base:      "http://" + net.JoinHostPort("127.0.0.1", port),
 		port:      port,
+		version:   version,
 		http:      &http.Client{Timeout: 10 * time.Second},
 		awaitHTTP: &http.Client{}, // no timeout: bounded by the request context
 	}
@@ -76,6 +91,11 @@ func (c *daemonClient) probeURLTemplate(sessionID string) string {
 func (c *daemonClient) ensureDaemon(ctx context.Context) error {
 	switch info, err := c.health(ctx); {
 	case err == nil && info.Version != "":
+		// The daemon is up and identified as sherlog. If its version differs from
+		// this process's, disclose it once — the half of an upgrade a running
+		// Claude session cannot fix (D-E). Never a behavior change: the mismatch
+		// path still returns nil and every tool call proceeds normally.
+		c.noteVersionMismatch(info.Version)
 		return nil // sherlog is up
 	case err == nil:
 		// Port answered /health but did not identify as sherlog. Treat any other
@@ -95,6 +115,35 @@ func (c *daemonClient) ensureDaemon(ctx context.Context) error {
 		return fmt.Errorf("auto-spawn daemon: %w", err)
 	}
 	return c.waitForHealth(ctx)
+}
+
+// noteVersionMismatch emits a single informational stderr line, at most once per
+// process, when the daemon's reported version differs from this MCP process's
+// compiled version (restart-on-upgrade D-E). It is disclosure only: the client
+// keeps using the daemon exactly as before — a version delta triggers no restart,
+// no kill, and no refusal. A stale MCP process must never act on the comparison
+// (D-A: the disk is the single source of truth, the stale observer gets no vote);
+// only a Claude session restart reloads the tool schemas a new binary exposes, and
+// that lifecycle belongs to Claude Code, not sherlog. Matching versions consume no
+// Once so a later genuine mismatch in the same process is still disclosed.
+func (c *daemonClient) noteVersionMismatch(daemonVersion string) {
+	if daemonVersion == c.version {
+		return
+	}
+	c.versionMismatchOnce.Do(func() {
+		c.logline("sherlog: daemon version %s differs from this session's client version %s — restart the Claude session to load the new tool schemas", daemonVersion, c.version)
+	})
+}
+
+// logline routes an informational line to the injected logger, or log.Printf
+// (which writes to stderr) when none is injected. Matches the daemon watcher's
+// logline shape so tests can capture output without touching real stderr.
+func (c *daemonClient) logline(format string, args ...any) {
+	if c.logf != nil {
+		c.logf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
 }
 
 // foreignPortError is the actionable message for a non-sherlog listener (D4).

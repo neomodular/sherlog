@@ -70,6 +70,7 @@ func connectMCP(t *testing.T, ctx context.Context, base, port string) *mcpsdk.Cl
 	c := &daemonClient{
 		base:      base,
 		port:      port,
+		version:   "test", // matches the test daemon's /health version → no mismatch note
 		http:      &http.Client{Timeout: 10 * time.Second},
 		awaitHTTP: &http.Client{},
 	}
