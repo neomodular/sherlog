@@ -1,9 +1,10 @@
-<!-- Hero: the sherlog banner — Watson the coral detective magnifying the red lines
-out of a wall of logs. The square mascot art is docs/mascot.png (the Case Board
-logo); the terminal banner the skill prints is a text wordmark, not a sprite. See
-docs/brand.md. -->
+<!-- Hero: docs/hero.png — the mini mascot in its navy inspector cap over the
+"Elementary." wordmark and the project's thesis line. The square mascot art is
+docs/mascot.png (the Case Board logo); docs/banner.jpeg remains the wide
+detective-and-logs art (GitHub social preview); the terminal banner the skill
+prints is a text wordmark, not a sprite. See docs/brand.md. -->
 <p align="center">
-  <img src="docs/banner.jpeg" alt="sherlog — a coral detective in a navy inspector cap magnifying the glowing red lines in a wall of logs">
+  <img src="docs/hero.png" alt="Elementary. — Evidence over narrative. The board over the vibe. The sherlog mascot, a coral detective in a navy inspector cap, above the wordmark">
 </p>
 
 # sherlog

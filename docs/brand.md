@@ -18,7 +18,10 @@ Watson — a coral detective in a navy inspector cap. The **canonical mascot is 
 raster image**, [`mascot.png`](mascot.png): the square badge logo in the Case Board
 header, and the source of the brand's two colors. The wide hero — Watson magnifying
 the glowing red lines out of a wall of logs — is [`banner.jpeg`](banner.jpeg); it
-heads the README and doubles as the GitHub social-preview image.
+doubles as the GitHub social-preview image. The README is headed by
+[`hero.png`](hero.png) — the mini mascot in its inspector cap over the
+**"Elementary."** wordmark and the thesis line, *"Evidence over narrative. The
+board over the vibe."*
 
 Terminals can't render the mascot's soft, rounded shape, so **the terminal does not
 draw the mascot** — it prints a text wordmark banner instead (see below). There is
