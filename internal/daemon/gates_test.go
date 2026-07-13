@@ -736,3 +736,43 @@ func TestCasesFeedCarriesReproRate(t *testing.T) {
 		t.Errorf("cases feed repro_rate missing: %+v", cases[0].ReproRate)
 	}
 }
+
+// --- Probe id + resolution text through HTTP (restart-on-upgrade dogfood findings) ---
+
+// TestProbeIDRequiredThroughHTTP pins the raw-API rejection: registering a probe
+// without an id is a 400 with the repair instruction, not a silently persisted
+// ("", 0) bucket.
+func TestProbeIDRequiredThroughHTTP(t *testing.T) {
+	srv, st := newTestServer(t)
+	sess, dir := sessionWithCWD(t, st)
+	writeLines(t, dir, "a.js", 5)
+
+	w := do(srv, http.MethodPost, "/api/sessions/"+sess.ID+"/probes",
+		`{"file":"a.js","line":1,"hypothesis_id":"h1"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "non-empty id") {
+		t.Errorf("error should demand a probe id: %s", w.Body.String())
+	}
+}
+
+// TestResolutionTextThroughHTTP pins the single-line contract at the API surface:
+// a solved close carrying a newline in root_cause is a 400 and the session stays open.
+func TestResolutionTextThroughHTTP(t *testing.T) {
+	srv, st := newTestServer(t)
+	sess, _ := seedConfirmedSession(t, srv, st)
+
+	w := do(srv, http.MethodDelete, "/api/sessions/"+sess.ID,
+		`{"root_cause":"root\ncause","fix_summary":"fix","confirmed_hypothesis_id":"h1"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "single-line") {
+		t.Errorf("error should state the single-line contract: %s", w.Body.String())
+	}
+	got, err := st.GetSession(sess.ID)
+	if err != nil || got.ClosedAt != nil {
+		t.Errorf("rejected close must leave the session open: err=%v closed=%v", err, got.ClosedAt)
+	}
+}

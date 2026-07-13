@@ -117,7 +117,10 @@ The daemon **validates a solved close** (see [architecture.md](architecture.md),
 "Mechanical gates"): supplying *any* resolution field — including a lone
 `regression_test_ref` or `guardrail` — requires all three core fields, and
 `confirmed_hypothesis_id` must reference a hypothesis that is `confirmed` on the
-board. A `guardrail.type` outside the enum is rejected. On any of these, the tool
+board. A `guardrail.type` outside the enum is rejected, and every resolution text
+field (`root_cause`, `fix_summary`, `regression_test_ref`, the guardrail `ref`)
+must be **single-line plain text** — control characters and newlines are rejected,
+since these fields feed recall and the Case Board. On any of these, the tool
 returns the daemon's one-line repair instruction and **the session stays open** —
 it is never silently downgraded to unsolved. Prevention references are recorded
 and displayed only; sherlog never fetches or runs them (local-only invariant).

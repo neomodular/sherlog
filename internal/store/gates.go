@@ -57,6 +57,18 @@ var (
 	// would skip the kill/confirm citation checks entirely and still be written to the
 	// board — a gate bypass found live by the release dogfood.
 	ErrInvalidHypothesisStatus = errors.New("invalid hypothesis status")
+
+	// ErrProbeIDRequired is returned when a probe registration carries a blank id.
+	// The MCP tool always supplies one; this guards raw /api/ callers whose empty
+	// id would otherwise persist and zero-fill as ("", 0) in every await summary —
+	// found live by the restart-on-upgrade dogfood.
+	ErrProbeIDRequired = errors.New("probe id required")
+
+	// ErrInvalidResolutionText is returned when a resolution text field carries
+	// control characters. Resolution fields are single-line plain text — they feed
+	// recall and the Case Board — and a past close persisted raw multi-line
+	// tool-call fragments into a root cause, found live by the same dogfood.
+	ErrInvalidResolutionText = errors.New("invalid resolution text")
 )
 
 // minHypotheses is the board floor enforced by SetHypotheses (D-E): a real
@@ -139,12 +151,40 @@ func validateResolutionLocked(sess *Session, res *Resolution) error {
 	if res.RootCause == "" || res.FixSummary == "" || res.ConfirmedHypothesisID == "" {
 		return fmt.Errorf("a solved close needs root_cause, fix_summary, and confirmed_hypothesis_id (or close unsolved with none): %w", ErrResolutionIncomplete)
 	}
+	// Malformation before cross-checks: resolution fields are single-line plain
+	// text (they feed recall and the board), so control characters — the shape of
+	// pasted multi-line tool-call fragments — are rejected at the door.
+	for _, f := range []struct{ name, value string }{
+		{"root_cause", res.RootCause},
+		{"fix_summary", res.FixSummary},
+		{"regression_test_ref", res.RegressionTestRef},
+	} {
+		if err := validateResolutionText(f.name, f.value); err != nil {
+			return err
+		}
+	}
+	if res.Guardrail != nil {
+		if err := validateResolutionText("guardrail ref", res.Guardrail.Ref); err != nil {
+			return err
+		}
+	}
 	h := findHypothesis(sess, res.ConfirmedHypothesisID)
 	if h == nil || h.Status != HypothesisConfirmed {
 		return fmt.Errorf("confirmed_hypothesis_id %q is not confirmed on the board — confirm it with evidence before closing solved: %w", res.ConfirmedHypothesisID, ErrUnconfirmedHypothesis)
 	}
 	if res.Guardrail != nil && !validGuardrailType(res.Guardrail.Type) {
 		return fmt.Errorf("guardrail type %q is not one of test, lint, alert, doc: %w", res.Guardrail.Type, ErrInvalidGuardrailType)
+	}
+	return nil
+}
+
+// validateResolutionText rejects control characters in a resolution text field,
+// keeping the field single-line plain text fit for recall and display.
+func validateResolutionText(field, value string) error {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%s must be single-line plain text — remove newlines and control characters: %w", field, ErrInvalidResolutionText)
+		}
 	}
 	return nil
 }

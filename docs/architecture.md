@@ -187,7 +187,8 @@ What each gate catches, and where it lives:
 | Evidence citation (D-B) | a kill/confirm with no `probe_id`+`run_id`, an unknown probe, or an unknown/open run | `store.UpdateHypothesis` |
 | Confirm gate (D-C) | a confirm with no `reproduced` run in the session, or a cited probe carrying no predictions | `store.UpdateHypothesis` |
 | Fixed-check prediction (D-D) | a `fixed-check` close on a run with no recorded prediction | `store.CloseRun` |
-| Solved close (D-F, D-J) | a partial resolution, a `confirmed_hypothesis_id` not confirmed on the board, or an out-of-enum guardrail type; the session stays **open** | `store.CloseSessionWithResolution` |
+| Solved close (D-F, D-J) | a partial resolution, a `confirmed_hypothesis_id` not confirmed on the board, an out-of-enum guardrail type, or control characters in any resolution text field (resolution text is single-line — it feeds recall and the board); the session stays **open** | `store.CloseSessionWithResolution` |
+| Probe id | a probe registration with a blank id — a raw `/api/` caller's empty id would otherwise zero-fill as `("", 0)` in every await summary (the MCP tool always supplies one) | `store.RegisterProbe` |
 | False-coverage (blast-radius D-C) | a sibling search mapped with no `confirmed` hypothesis, or whose pattern misses the confirmed culprit's own file; no radius is stored | `store.SetBlastRadius` |
 
 The internal `/api/` write surface also decodes **strictly**: an unknown JSON

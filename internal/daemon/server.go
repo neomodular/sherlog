@@ -710,7 +710,9 @@ func (s *Server) handleStoreErr(w http.ResponseWriter, err error) bool {
 		errors.Is(err, store.ErrCulpritNotInRadius),
 		errors.Is(err, store.ErrNoBlastRadius),
 		errors.Is(err, store.ErrUnknownRadiusHit),
-		errors.Is(err, store.ErrInvalidBlastVerdict):
+		errors.Is(err, store.ErrInvalidBlastVerdict),
+		errors.Is(err, store.ErrProbeIDRequired),
+		errors.Is(err, store.ErrInvalidResolutionText):
 		writeError(w, http.StatusBadRequest, err)
 	case errors.Is(err, store.ErrSessionNotFound),
 		errors.Is(err, store.ErrHypothesisNotFound),

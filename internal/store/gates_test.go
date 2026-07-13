@@ -838,3 +838,78 @@ func TestSolvedCloseWithoutRefsSucceeds(t *testing.T) {
 		t.Errorf("resolution should persist with empty refs: %+v", got.Resolution)
 	}
 }
+
+// --- Probe id + resolution text (restart-on-upgrade dogfood findings) ---
+
+// TestProbeIDRequired pins the raw-API gap the dogfood found: a blank probe id
+// used to persist and zero-fill as ("", 0) in every await summary. The store now
+// rejects it; the MCP tool always supplies an id, so only raw callers ever see this.
+func TestProbeIDRequired(t *testing.T) {
+	for _, id := range []string{"", "   "} {
+		t.Run("id="+id, func(t *testing.T) {
+			s := newTestStore(t)
+			sess, _, _ := s.CreateSession("", "bug", "/repo")
+			s.SetHypotheses(sess.ID, []string{"a", "b", "c"})
+
+			_, err := s.RegisterProbe(sess.ID, Probe{ID: id, File: "f.go", Line: 1, HypothesisID: "h1"})
+			if !errors.Is(err, ErrProbeIDRequired) {
+				t.Fatalf("want ErrProbeIDRequired, got %v", err)
+			}
+			got, _ := s.GetSession(sess.ID)
+			if len(got.Probes) != 0 {
+				t.Errorf("blank-id probe must not persist: %+v", got.Probes)
+			}
+		})
+	}
+}
+
+// TestResolutionTextGate pins resolution fields as single-line plain text: a past
+// close persisted multi-line tool-call fragments into a root cause (dogfood find),
+// polluting recall and the board. Control characters are rejected per field; the
+// rejection leaves the session open.
+func TestResolutionTextGate(t *testing.T) {
+	clean := func() *Resolution {
+		return &Resolution{RootCause: "root", FixSummary: "fix", ConfirmedHypothesisID: "h1"}
+	}
+	cases := []struct {
+		name   string
+		mutate func(*Resolution)
+	}{
+		{"newline in root_cause", func(r *Resolution) { r.RootCause = "root\n</root_cause>" }},
+		{"tab in fix_summary", func(r *Resolution) { r.FixSummary = "fix\tsummary" }},
+		{"carriage return in regression_test_ref", func(r *Resolution) { r.RegressionTestRef = "Test\rName" }},
+		{"escape in guardrail ref", func(r *Resolution) { r.Guardrail = &Guardrail{Type: "lint", Ref: "rule\x1b[0m"} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			sess, _, _ := s.CreateSession("", "bug", "/repo")
+			s.SetHypotheses(sess.ID, []string{"a", "b", "c"})
+			confirmH1(t, s, sess.ID)
+
+			res := clean()
+			tc.mutate(res)
+			_, err := s.CloseSessionWithResolution(sess.ID, res)
+			if !errors.Is(err, ErrInvalidResolutionText) {
+				t.Fatalf("want ErrInvalidResolutionText, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "single-line") {
+				t.Errorf("error should state the single-line contract: %v", err)
+			}
+			got, _ := s.GetSession(sess.ID)
+			if got.ClosedAt != nil {
+				t.Errorf("rejected resolution text must leave the session open: %v", got.ClosedAt)
+			}
+		})
+	}
+
+	t.Run("clean single-line close passes", func(t *testing.T) {
+		s := newTestStore(t)
+		sess, _, _ := s.CreateSession("", "bug", "/repo")
+		s.SetHypotheses(sess.ID, []string{"a", "b", "c"})
+		confirmH1(t, s, sess.ID)
+		if _, err := s.CloseSessionWithResolution(sess.ID, clean()); err != nil {
+			t.Fatalf("clean resolution should close: %v", err)
+		}
+	})
+}

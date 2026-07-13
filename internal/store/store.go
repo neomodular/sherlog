@@ -514,6 +514,9 @@ var ErrHypothesisNotFound = errors.New("hypothesis not found")
 // probe is stored; the file/line existence check lives in the daemon, which alone
 // reliably knows the session cwd (D-G).
 func (s *Store) RegisterProbe(sessionID string, p Probe) (Probe, error) {
+	if strings.TrimSpace(p.ID) == "" {
+		return Probe{}, fmt.Errorf("register probe in %q: a probe needs a non-empty id (p1, p2, …): %w", sessionID, ErrProbeIDRequired)
+	}
 	if err := validatePredictionPair(p.ExpectedIfTrue, p.ExpectedIfFalse); err != nil {
 		return Probe{}, fmt.Errorf("register probe in %q: %w", sessionID, err)
 	}
