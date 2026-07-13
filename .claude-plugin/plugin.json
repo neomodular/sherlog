@@ -1,6 +1,6 @@
 {
   "name": "sherlog",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Hypothesis-driven debugging for Claude Code: the /debug detective loop drives suspects, discriminating probes, blocking reproduction waits, and guaranteed probe cleanup over a localhost daemon on :2218. Requires the sherlog binary on PATH — install it first with `brew install neomodular/tap/sherlog`.",
   "author": {
     "name": "neomodular"
