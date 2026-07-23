@@ -35,6 +35,16 @@ jobs:
       - name: build
         run: go build ./...
 
+      # sherlog releases a Windows binary (Scoop + manual zip), so the Windows
+      # cross-build is a supported target and must not regress. A unix-only
+      # syscall placed outside a *_unix.go file compiles fine on Linux but breaks
+      # windows/*; this step catches that at PR time instead of at release time.
+      # Both Windows GOARCHes are released, so verify both.
+      - name: cross-build (windows)
+        run: |
+          GOOS=windows GOARCH=amd64 go build ./...
+          GOOS=windows GOARCH=arm64 go build ./...
+
       # -race needs CGO; Windows dev machines without a GNU toolchain can't run
       # it locally, so CI is the authoritative race check.
       - name: test

@@ -21,12 +21,21 @@ server cannot start and no tools appear.
    sherlog --version
    ```
 
-   If this prints "command not found", install it (`brew install
-   neomodular/tap/sherlog`) or add its location to PATH. The binary must be
-   installed **before** the plugin can work — they version together.
+   If this prints "command not found", install it and/or add its location to
+   PATH. The binary must be installed **before** the plugin can work — they
+   version together.
+
+   - **macOS / Linux:** `brew install neomodular/tap/sherlog`.
+   - **Windows:** `scoop install sherlog` (after
+     `scoop bucket add neomodular https://github.com/neomodular/scoop-bucket`),
+     or unzip `sherlog.exe` into a folder on your `PATH`. Then open a **new**
+     terminal — a running shell (and Claude Code launched from it) keeps the old
+     `PATH` and will still report "not found" until it is restarted.
 
 2. Restart Claude Code so the plugin re-launches the MCP server now that the
-   binary resolves.
+   binary resolves. On Windows the MCP host resolves the bare `sherlog` command
+   to `sherlog.exe` via `PATHEXT`; if it does not, ensure the folder holding
+   `sherlog.exe` is on `PATH` and relaunch Claude Code from a fresh terminal.
 
 ## `await_run` returns zero events after I reproduced the bug
 

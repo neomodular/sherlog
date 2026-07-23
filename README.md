@@ -30,12 +30,47 @@ sherlog has two parts that version together: the binary and the Claude Code
 plugin. **Install the binary first** — the plugin's MCP server launches `sherlog`
 from your PATH.
 
-1. **Binary** (Homebrew, macOS/Linux):
+1. **Binary** — pick the channel for your OS:
+
+   **macOS / Linux** (Homebrew):
 
    ```sh
    brew install neomodular/tap/sherlog
    sherlog --version
    ```
+
+   **Windows** (Scoop) — the one-liner. Requires [Scoop](https://scoop.sh)
+   itself; if you don't have it, install it first from that page.
+
+   ```powershell
+   scoop bucket add neomodular https://github.com/neomodular/scoop-bucket
+   scoop install sherlog
+   sherlog --version
+   ```
+
+   Scoop puts `sherlog.exe` on your `PATH` automatically — nothing else to do.
+
+   **Windows** (manual, no Scoop):
+
+   1. From the
+      [latest release](https://github.com/neomodular/sherlog/releases/latest),
+      download `sherlog_<version>_windows_amd64.zip` — or the `arm64` zip on
+      ARM devices (e.g. Surface Pro X).
+   2. Extract `sherlog.exe` into a folder you control, e.g. `%USERPROFILE%\bin`.
+   3. Add that folder to your **user** `PATH` (once), then open a **new**
+      terminal so the change takes effect:
+
+      ```powershell
+      [Environment]::SetEnvironmentVariable(
+        "PATH",
+        [Environment]::GetEnvironmentVariable("PATH", "User") + ";$env:USERPROFILE\bin",
+        "User")
+      ```
+
+      Or do it in the GUI: **Settings → Edit environment variables for your
+      account → Path → New**. (Avoid `setx PATH "$env:PATH;..."` — it bakes the
+      full expanded session `PATH` into your user variable and can truncate it.)
+   4. Confirm in the new terminal: `sherlog --version`.
 
 2. **Plugin** (Claude Code): inside any Claude Code session, run:
 
@@ -49,9 +84,9 @@ from your PATH.
    `/debug` is available with no further configuration.
 
 If the plugin's MCP server fails to start, the binary is almost certainly not on
-PATH — re-run the `brew install` above, or see
-[docs/troubleshooting.md](docs/troubleshooting.md). (Windows is supported for
-`go build` development but is not yet packaged.)
+PATH — reinstall it for your OS above (on Windows, open a **new** terminal so the
+updated `PATH` is picked up), or see
+[docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## 60-second tour
 

@@ -1,5 +1,6 @@
 # goreleaser config for sherlog (task 7.1/7.2).
-# One config drives all four targets and the Homebrew tap (D1, D14).
+# One config drives all six targets (darwin/linux/windows × arm64/amd64), the
+# Homebrew tap (macOS + Linux), and the Scoop bucket (Windows) (D1, D14).
 #
 # Validate locally with: goreleaser release --clean --snapshot --skip=publish
 # Do NOT gate on `goreleaser check`: it exits non-zero on the deliberately
@@ -30,9 +31,15 @@ builds:
     # cmd/sherlog/main.go, set per task 5.1). -s -w strip the symbol table.
     ldflags:
       - -s -w -X main.version={{.Version}}
+    # windows/{amd64,arm64} cross-compile cleanly: the OS-specific pieces
+    # (daemon detach in internal/mcp/spawn_windows.go, the binary watcher's
+    # non-syscall fallback in internal/daemon/binwatch_other.go) are already
+    # split behind build tags, and home resolution uses os.UserHomeDir()
+    # (USERPROFILE on Windows). CGO_ENABLED=0 keeps the cross-build trivial.
     goos:
       - darwin
       - linux
+      - windows
     goarch:
       - arm64
       - amd64
@@ -40,6 +47,12 @@ builds:
 archives:
   - id: sherlog
     formats: [tar.gz]
+    # Windows ships as .zip, not .tar.gz: it is the format Windows users expect
+    # and unzip natively, and Scoop *requires* a zip archive to install from (a
+    # binary/tar.gz archive is rejected by the scoop manifest generator).
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     files:
@@ -61,10 +74,11 @@ changelog:
       - "^chore:"
 
 # Homebrew tap publication (task 7.2). A formula (not a cask) installs on both
-# macOS and Linux via `brew install neomodular/tap/sherlog`, covering all four
-# release targets (D14). Casks are macOS-only, so they would strand the required
-# linux/arm64 + linux/amd64 builds — `homebrew_casks`, the replacement for
-# `brews`, is therefore not viable here.
+# macOS and Linux via `brew install neomodular/tap/sherlog`, covering the four
+# unix release targets (D14). Casks are macOS-only, so they would strand the
+# required linux/arm64 + linux/amd64 builds — `homebrew_casks`, the replacement
+# for `brews`, is therefore not viable here. Windows is served by Scoop below,
+# not Homebrew.
 #
 # `brews` is hard-deprecated as of goreleaser v2.16 (it still generates the
 # correct multi-OS formula and is only removed on a major version, i.e. v3).
@@ -84,6 +98,29 @@ brews:
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     homepage: "https://github.com/neomodular/sherlog"
     description: "Hypothesis-driven debugging for Claude Code — the /debug detective loop over a localhost daemon on :2218"
+
+# Scoop bucket publication — the Windows counterpart to the Homebrew tap. Scoop
+# installs the windows/amd64 .zip via `scoop install sherlog` once the bucket is
+# added. goreleaser generates the manifest from the release's windows zip and
+# pushes it to neomodular/scoop-bucket. Unlike `brews`, `scoops` is NOT
+# deprecated, so this block is future-proof against the v3 removal of `brews`.
+#
+# One-time setup (documented in .github/workflows/release.yml):
+#   1. Create the empty public repo neomodular/scoop-bucket.
+#   2. Add a repo-scoped PAT as the SCOOP_GITHUB_TOKEN secret on this repo.
+scoops:
+  - name: sherlog
+    repository:
+      owner: neomodular
+      name: scoop-bucket
+      branch: main
+      # Cross-repo push needs a PAT with repo scope on the bucket, supplied by
+      # CI as SCOOP_GITHUB_TOKEN (documented in .github/workflows/release.yml).
+      token: "{{ .Env.SCOOP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/neomodular/sherlog"
+    description: "Hypothesis-driven debugging for Claude Code — the /debug detective loop over a localhost daemon on :2218"
+    license: MIT
+    commit_msg_template: "chore(scoop): sherlog {{ .Tag }}"
 
 release:
   github:
