@@ -39,7 +39,8 @@ from your PATH.
    sherlog --version
    ```
 
-   **Windows** (Scoop):
+   **Windows** (Scoop) — the one-liner. Requires [Scoop](https://scoop.sh)
+   itself; if you don't have it, install it first from that page.
 
    ```powershell
    scoop bucket add neomodular https://github.com/neomodular/scoop-bucket
@@ -47,11 +48,29 @@ from your PATH.
    sherlog --version
    ```
 
-   **Windows** (manual, no Scoop): download
-   `sherlog_<version>_windows_amd64.zip` from the
-   [latest release](https://github.com/neomodular/sherlog/releases/latest),
-   extract `sherlog.exe` into a folder on your `PATH` (e.g.
-   `%USERPROFILE%\bin`), then confirm with `sherlog --version`.
+   Scoop puts `sherlog.exe` on your `PATH` automatically — nothing else to do.
+
+   **Windows** (manual, no Scoop):
+
+   1. From the
+      [latest release](https://github.com/neomodular/sherlog/releases/latest),
+      download `sherlog_<version>_windows_amd64.zip` — or the `arm64` zip on
+      ARM devices (e.g. Surface Pro X).
+   2. Extract `sherlog.exe` into a folder you control, e.g. `%USERPROFILE%\bin`.
+   3. Add that folder to your **user** `PATH` (once), then open a **new**
+      terminal so the change takes effect:
+
+      ```powershell
+      [Environment]::SetEnvironmentVariable(
+        "PATH",
+        [Environment]::GetEnvironmentVariable("PATH", "User") + ";$env:USERPROFILE\bin",
+        "User")
+      ```
+
+      Or do it in the GUI: **Settings → Edit environment variables for your
+      account → Path → New**. (Avoid `setx PATH "$env:PATH;..."` — it bakes the
+      full expanded session `PATH` into your user variable and can truncate it.)
+   4. Confirm in the new terminal: `sherlog --version`.
 
 2. **Plugin** (Claude Code): inside any Claude Code session, run:
 
