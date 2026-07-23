@@ -1,8 +1,9 @@
 name: Release
 
-# Tagging v* drives a full release: goreleaser builds the four targets, cuts a
-# GitHub release, and pushes the Homebrew formula to neomodular/homebrew-tap
-# (tasks 7.2, 7.3).
+# Tagging v* drives a full release: goreleaser builds the six targets
+# (darwin/linux/windows × arm64/amd64), cuts a GitHub release, pushes the
+# Homebrew formula to neomodular/homebrew-tap (macOS + Linux), and pushes the
+# Scoop manifest to neomodular/scoop-bucket (Windows) (tasks 7.2, 7.3).
 on:
   push:
     tags:
@@ -42,3 +43,10 @@ jobs:
           # Settings → Developer settings → Personal access tokens, then add it
           # to this repo as the TAP_GITHUB_TOKEN secret.
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          # PAT with repo scope on neomodular/scoop-bucket so goreleaser can push
+          # the Scoop manifest (the Windows counterpart to the tap). A classic
+          # PAT with `repo` scope already covers this bucket, so the same token
+          # value used for TAP_GITHUB_TOKEN may be reused here — just add it under
+          # this second secret name. The bucket repo must exist first (create the
+          # empty neomodular/scoop-bucket repo before the first Windows release).
+          SCOOP_GITHUB_TOKEN: ${{ secrets.SCOOP_GITHUB_TOKEN }}
