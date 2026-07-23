@@ -124,6 +124,26 @@ Watch it live in the browser: while the daemon runs, open
 board, probe registry, run comparison, a live evidence tail, and stale probes).
 A full dogfood walkthrough is in [`examples/DOGFOOD.md`](examples/DOGFOOD.md).
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/board-cases-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/board-cases-light.png">
+    <img alt="The sherlog Case Board — a list of cases, each closed case showing its confirmed root cause" src="docs/board-cases-light.png" width="880">
+  </picture>
+  <br>
+  <sub><em>The Case Board — every case and its root cause at a glance.</em></sub>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/board-verdict-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/board-verdict-light.png">
+    <img alt="A closed sherlog case — the confirmed verdict panel with root cause, the fix, and the probe and runs that prove it" src="docs/board-verdict-light.png" width="880">
+  </picture>
+  <br>
+  <sub><em>Inside a closed case: the confirmed suspect, its root cause and fix, and the probe + runs that prove it — verdicts the daemon rejects if uncited.</em></sub>
+</p>
+
 `/debug resume` reconstructs an investigation from the daemon board after
 `/clear`, compaction, a crash, or days later.
 
